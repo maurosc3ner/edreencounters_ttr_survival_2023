@@ -1,0 +1,1120 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+-v1
+Using old dataset
+
+-v2
+Using preprocesssing_v3 dataset
+
+-v3 
+Using preprocesssing_v5 dataset, digits set 1 for age at visit
+
+-v4
+use of dataset v6 with EoE
+
+v5
+data/atm_survival_v7.RData with public insurance added
+jaccard index calculation
+
+v7
+drop of deprivation index
+
+v8
+non normal t-test
+
+v9
+Use of atm_survival_v8.RData with improved inclusion criteria
+t-test reemplazados por lmm para time-varying covariates
+code clean-up
+
+v10
+multimorbidity added 
+proportion matrix functions added to helpers.r
+
+v11
+sex added code cleanup for reviewer comments
+counts for reencounters
+
+v12 
+proofread corrections from Dr. Lili Ding:
+allergic comorbidities counts added by disease-specific for Table 1
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = FALSE,message=FALSE,warning = F,results = F)
+rm(list = ls())
+```
+
+
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(patchwork)
+library(tidyverse)
+library(foreign)
+library(lubridate)
+library(tableone)
+library(nlme)
+source("helpers.r")
+cbPalette <- c("#999999",  "#E64B35", "#4DBBD5", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+load("data/atm_survival_v8.RData")
+ad_wide$myICD<-"L20"
+as_wide$myICD<-"J45"
+ar_wide$myICD<-"J30"
+fa_wide$myICD<-"Z91"
+eoe_wide$myICD<-"K20"
+all_diseases<-rbind(ad_wide,as_wide,ar_wide,fa_wide,eoe_wide)%>% 
+  mutate(
+    comorbidities=rowSums(across(c(AD,AS,AR,FA,EoE))),
+    onemore=if_else(comorbidities>=2,"Yes","No"),
+    multimorbidity=case_when(
+      comorbidities==1 ~ "Zero",
+      comorbidities==2 ~ "One",
+      comorbidities>=3 ~ "Two_or_more"
+      )
+  ) %>% 
+  filter(edvisit==1)
+
+#799820
+#213807
+# 69895 censoring
+# 283702 all
+# write.csv(all_diseases,"data/JACIiP_EHR_Data.csv",row.names = F)
+```
+
+
+```{r}
+#first visit
+firstVisit<- all_diseases %>%
+  filter(enum==1)
+
+#more than one visit
+reVisits<- all_diseases %>%
+  filter(enum>1 & edvisit!=0)
+
+#first visit
+censoredVisit<- all_diseases %>%
+  filter(edvisit==0)
+
+
+
+```
+
+
+# Patient-level
+
+```{r}
+all_diseases %>% 
+  group_by(PAT_MRN_ID) %>% 
+  distinct(PAT_MRN_ID,.keep_all = T) %>% 
+  summarise(n=n())
+
+all_diseases %>% 
+  distinct(PAT_MRN_ID,.keep_all = T) %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())
+
+
+all_diseases %>% 
+  ungroup() %>% 
+  summarise(n=n())
+
+all_diseases %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())
+```
+
+
+
+# Sex by disease
+
+```{r}
+onlypatients<-all_diseases %>% 
+  group_by(PAT_MRN_ID) %>% 
+  distinct(PAT_MRN_ID,.keep_all = T)
+myVars<-c("GENDER"
+          )
+tab <- CreateTableOne(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = onlypatients,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T)
+
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = onlypatients,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T)
+```
+
+```{r}
+myVars <- c("multimorbidity")
+myVars<-c("AD","FA","AS","AR","EoE")
+# CreateContTable is required for limiting digits
+data<-all_diseases 
+#%>% 
+ # filter(myICD=="L20")
+tab <- CreateTableOne(
+  vars = myVars,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+# kableone(tab,digits=1,nonnormal=T)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+# kableone(tab,digits=1,nonnormal=T)
+```
+
+
+# Age of onset
+
+## AD onset
+
+```{r}
+#first diagnosis of each disease
+all_onset<-all_diseases %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>%
+  distinct(myICD,.keep_all = TRUE)
+
+myVars <- c("age_visit")
+# CreateContTable is required for limiting digits
+tab <- CreateContTable(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="L20"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    digits = 1,
+    nonnormal = F,
+    showAllLevels = T,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+tab <- CreateContTable(
+  vars = myVars,
+  strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="L20"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    digits=1,
+    nonnormal = F,
+    showAllLevels = F,
+    formatOptions = list(big.mark = ",",digits=1),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+```
+
+## FA onset
+
+```{r}
+tab <- CreateContTable(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="Z91"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+tab <- CreateContTable(
+  vars = myVars,
+  strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="Z91"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+```
+
+## AS onset
+
+```{r}
+tab <- CreateContTable(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="J45"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+tab <- CreateContTable(
+  vars = myVars,
+  strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="J45"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+```
+
+## AR onset
+
+```{r}
+tab <- CreateContTable(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="J30"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+tab <- CreateContTable(
+  vars = myVars,
+  strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="J30"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+```
+
+
+## EoE onset
+
+```{r}
+tab <- CreateContTable(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="K20"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+tab <- CreateContTable(
+  vars = myVars,
+  strata = "RACE" ,
+  data = all_onset %>% filter(myICD=="K20"),
+  # includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal = T)
+```
+
+# Neighborhood-level
+
+
+## All diseases at once
+
+```{r}
+data<-all_diseases %>% 
+  drop_na(ndvi,avgDailyPM,dep_index)
+myVars<-c(
+          "ndvi","avgDailyPM", "dep_index"
+          )
+tab <- CreateTableOne(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T)
+```
+
+
+
+## AD exposures
+
+
+```{r}
+data<-all_diseases %>% 
+  filter(myICD=="L20") %>% 
+  drop_na(ndvi,avgDailyPM)
+myVars<-c("GENDER","hcType",
+          "onemore" # lili's change
+          )
+tab <- CreateTableOne(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+
+
+mod_ov <- lme(ndvi ~ 1.0,random=~1|PAT_MRN_ID, data=data)
+summary(mod_ov)
+
+mod_race2 <- lme(ndvi ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data)
+summary(mod_race2,digits=2)
+
+#SE for overall population 
+mod_ov <- lme(avgDailyPM ~ 1.0,random=~1|PAT_MRN_ID, data=data)
+summary(mod_ov)
+
+#SE for AA would be the SE for intercept, SE=0.03
+mod_race2 <- lme(avgDailyPM ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data)
+summary(mod_race2)
+
+#Test of flipping group of reference
+#SE for EA would be the intercept, SE=0.04, p-value is the same as AA
+data$RACE2<-factor(data$RACE,levels = c("EA","AA"))
+mod_race3 <- lme(avgDailyPM ~ 1.0+RACE2,random=~1|PAT_MRN_ID, data=data)
+summary(mod_race3)
+
+# no intercept, direct way of getting SE for all groups, no P-value
+mod_race3b <- lme(avgDailyPM ~ 0.0+RACE2,random=~1|PAT_MRN_ID, data=data)
+summary(mod_race3b)
+```
+
+
+## FA exposures
+
+```{r}
+data<-all_diseases %>% 
+  filter(myICD=="Z91") 
+tab <- CreateTableOne(
+  vars = myVars,
+  # strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+
+mod_ov <- lme(ndvi ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_ov)
+
+mod_race2 <- lme(ndvi ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_race2)
+round(0.4248205+0.0285757,2)
+mod_ov <- lme(avgDailyPM ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_ov)
+
+mod_race2 <- lme(avgDailyPM ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_race2)
+
+round(8.948805-0.063526,2)
+```
+
+## Asthma exposures
+
+```{r}
+data<-all_diseases %>% 
+  filter(myICD=="J45") 
+tab <- CreateTableOne(
+  vars = myVars,
+  data =data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+
+mod_ov <- lme(ndvi ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_ov)
+mod_race2 <- lme(ndvi ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_race2)
+round(0.4207425+0.0309923,2)
+
+mod_ov <- lme(avgDailyPM ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_ov)
+mod_race2 <- lme(avgDailyPM ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_race2)
+round(8.850368+0.060346,2)
+```
+
+## AR exposures
+
+```{r}
+data<-all_diseases %>% 
+  filter(myICD=="J30") 
+tab <- CreateTableOne(
+  vars = myVars,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE,)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE,)
+
+mod_ov <- lme(ndvi ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_ov)
+mod_race2 <- lme(ndvi ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_race2)
+round(0.4191348+0.0335666,2)
+
+mod_ov <- lme(avgDailyPM ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_ov)
+mod_race2 <- lme(avgDailyPM ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_race2)
+round(8.730767+0.050879,2)
+```
+
+## EoE exposures
+
+```{r}
+data<-all_diseases %>% 
+  filter(myICD=="K20") 
+tab <- CreateTableOne(
+  vars = myVars,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+tab <- CreateTableOne(
+  vars = myVars,
+  strata = "RACE" ,
+  data = data,
+  includeNA = T,
+  test = T
+)
+tab2Mat <-
+  print(
+    tab,
+    nonnormal = T,
+    showAllLevels = TRUE,
+    formatOptions = list(big.mark = ","),
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE
+  )
+tab2Mat
+kableone(tab,digits=1,nonnormal=T,showAllLevels = TRUE)
+
+mod_ov <- lme(ndvi ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_ov)
+mod_race2 <- lme(ndvi ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(ndvi))
+summary(mod_race2)
+round(0.4313152+0.0284828,2)
+
+mod_ov <- lme(avgDailyPM ~ 1.0,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_ov)
+mod_race2 <- lme(avgDailyPM ~ 1.0+RACE,random=~1|PAT_MRN_ID, data=data%>% drop_na(avgDailyPM))
+summary(mod_race2)
+round(9.086473-0.211349,2)
+```
+
+  
+## Censoring  
+
+Censoring characterization for RMST
+
+### AD
+
+```{r}
+months <-0:59
+ad_total<-ad_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(ad_total)
+
+temp_ad<-ad_total
+for (i in months){
+  cens<-ad_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  filter(tstart>=i) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise("n.{i}":=n())
+  
+  temp_ad<-temp_ad %>%
+    left_join(cens,by="RACE")
+}
+temp_ad
+temp_ad2<-as.matrix(t(temp_ad))
+temp_ad3<-data.frame(month=months,
+                     AA=as.numeric(temp_ad2[3:nrow(temp_ad2),1]),
+                     EA=as.numeric(temp_ad2[3:nrow(temp_ad2),2])
+                     )
+temp_ad3$AA_perc<-1-round(temp_ad3$AA/ad_total$total[1],2)
+temp_ad3$EA_perc<-1-round(temp_ad3$EA/ad_total$total[2],2)
+temp_ad4<-gather(temp_ad3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+a<-ggplot(temp_ad4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="A",x="", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+a
+```
+
+### FA
+
+```{r}
+months <-0:59
+fa_total<-fa_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(fa_total)
+
+temp_fa<-fa_total
+for (i in months){
+  cens<-fa_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("n.{i}":=n())
+  
+  temp_fa<-temp_fa %>%
+    left_join(cens,by="RACE")
+}
+temp_fa
+temp_fa2<-as.matrix(t(temp_fa))
+temp_fa3<-data.frame(month=months,
+                     AA=as.numeric(temp_fa2[3:nrow(temp_fa2),1]),
+                     EA=as.numeric(temp_fa2[3:nrow(temp_fa2),2])
+                     )
+temp_fa3$AA_perc<-1-round(temp_fa3$AA/fa_total$total[1],2)
+temp_fa3$EA_perc<-1-round(temp_fa3$EA/fa_total$total[2],2)
+temp_fa4<-gather(temp_fa3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+b<-ggplot(temp_fa4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="B",x="", y="",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+b
+```
+
+### Asthma
+
+```{r}
+months <-0:59
+as_total<-as_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(as_total)
+
+temp_as<-as_total
+for (i in months){
+  cens<-as_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  filter(tstart>=i) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise("n.{i}":=n())
+  
+  temp_as<-temp_as %>%
+    left_join(cens,by="RACE")
+}
+temp_as
+temp_as2<-as.matrix(t(temp_as))
+temp_as3<-data.frame(month=months,
+                     AA=as.numeric(temp_as2[3:nrow(temp_as2),1]),
+                     EA=as.numeric(temp_as2[3:nrow(temp_as2),2])
+                     )
+temp_as3$AA_perc<-1-round(temp_as3$AA/as_total$total[1],2)
+temp_as3$EA_perc<-1-round(temp_as3$EA/as_total$total[2],2)
+temp_as4<-gather(temp_as3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+c<-ggplot(temp_as4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="C",x="", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+c
+```
+
+
+### AR
+
+```{r}
+months <-0:59
+ar_total<-ar_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(ar_total)
+
+temp_ar<-ar_total
+for (i in months){
+  cens<-ar_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  filter(tstart>=i) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise("n.{i}":=n())
+  
+  temp_ar<-temp_ar %>%
+    left_join(cens,by="RACE")
+}
+temp_ar
+temp_ar2<-as.matrix(t(temp_ar))
+temp_ar3<-data.frame(month=months,
+                     AA=as.numeric(temp_ar2[3:nrow(temp_ar2),1]),
+                     EA=as.numeric(temp_ar2[3:nrow(temp_ar2),2])
+                     )
+temp_ar3$AA_perc<-1-round(temp_ar3$AA/ar_total$total[1],2)
+temp_ar3$EA_perc<-1-round(temp_ar3$EA/ar_total$total[2],2)
+temp_ar4<-gather(temp_ar3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+d<-ggplot(temp_ar4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="D",x="Time (months)", y="",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+d
+```
+
+### EoE
+
+```{r}
+months <-0:59
+eoe_total<-eoe_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(eoe_total)
+
+temp_eoe<-eoe_total
+for (i in months){
+  cens<-eoe_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  filter(tstart>=i) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise("n.{i}":=n())
+  
+  temp_eoe<-temp_eoe %>%
+    left_join(cens,by="RACE")
+}
+temp_eoe
+temp_eoe2<-as.matrix(t(temp_eoe))
+temp_eoe3<-data.frame(month=months,
+                     AA=as.numeric(temp_eoe2[3:nrow(temp_eoe2),1]),
+                     EA=as.numeric(temp_eoe2[3:nrow(temp_eoe2),2])
+                     )
+temp_eoe3$AA_perc<-1-round(temp_eoe3$AA/eoe_total$total[1],2)
+temp_eoe3$EA_perc<-1-round(temp_eoe3$EA/eoe_total$total[2],2)
+temp_eoe4<-gather(temp_eoe3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+
+```{r}
+e<-ggplot(temp_eoe4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="E",x="Time (months)", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.key.size = unit(6,"point"),
+        legend.title = element_text(size=13),
+        legend.text=element_text(size=13),
+        text=element_text(family="Times New Roman"))
+## Function to extract legend
+get_legend <- function(a.gplot){ 
+    tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+    legend <- tmp$grobs[[leg]] 
+    legend
+} 
+
+legend<-get_legend(e)
+e<-e+theme(legend.position = "none")
+
+
+```
+
+
+```{r}
+f_censoring<-(a+b)/(c+d)/(e+legend)
+f_censoring
+
+ggsave(filename = "images/fs.censoring.png", f_censoring,# en cm mejor para mantener el tamanho
+  width=2200,height = 2600, dpi = 300, units = "px", device='png')
+```
+

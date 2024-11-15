@@ -1,0 +1,1264 @@
+---
+title: "Untitled"
+author: "Esteban Correa"
+date: "2022-08-04"
+output: html_document
+---
+
+-v2 
+bayes for asthma dataset
+
+-v3
+Make use of v5 dataset
+Generalization of rmst helper functions
+
+-v4
+Use onemore for one or more comordities AD/AS/AR/FA instead of Atopic dermatitis [Jocelyn's PARS paper].
+
+-v5
+Updated to run on Apple Silicon 
+
+v6
+data/atm_survival_v7.RData with public insurance added
+
+v7 
+drop of deprivation index, EoE added to comorbidities
+
+v8
+elpd, cindex, and calibration plots added
+
+v9
+Use of atm_survival_v8.RData with improved inclusion criteria
+code clean up, 10k MCMC, 95% CI for HR and RMST
+use of formula f6
+
+v10
+use of formula f7
+
+v11
+Use of atm_survival_v8.RData 
+use of f7 formula
+Add f0 for null model
+Code clean up and f4 models removed
+
+v12
+Re run for new splines2 v0.5.1 and rstanarm v2.26.1
+
+v13
+make use centered versions for greenspace and pm2.5
+Inclusion of frailty term in f9 equations
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(rstanarm)
+library(survival)
+library(tidyverse)
+library(patchwork)
+library(bayesplot)
+library(loo)
+library(gtsummary)
+
+source("helpers.r")
+load("output/cchmc.as.v13.RData")
+```
+
+
+
+# Asthma readmission
+
+## Dataset preparation
+
+
+```{r}
+load("data/atm_survival_v8.RData")
+
+# Note: imputation of covariates for last visit is required to enable right censoring
+data<-as_wide %>%
+  mutate(GENDER=factor(GENDER,levels = c("Female", "Male")),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(AD,AR,FA,EoE))), # except Asthma
+    onemore=if_else(comorbidities>=1,TRUE,FALSE)
+  )%>% 
+  select(PAT_MRN_ID,tstart,tstop,tstart2,tstop2,edvisit,futime,enum,age_visit,GENDER,RACE,AD,FA,AS,AR,EoE,onemore,hcType,dep_index,ndvi,avgDailyPM) %>% 
+  drop_na() %>% # added to avoid NA at validation
+  arrange(PAT_MRN_ID,enum)
+
+summary(as_wide)
+summary(data)
+
+data2<-data %>% filter(tstart2==tstop2)
+data<-data %>% 
+  filter(!(PAT_MRN_ID %in% data2$PAT_MRN_ID))
+
+data %>% 
+  distinct(PAT_MRN_ID,.keep_all = T) %>% 
+  group_by(RACE) %>% 
+  summarise(freq=n())
+
+#Centering
+data <- data %>%
+  ungroup() %>%
+  mutate(PAT_MRN_ID2=as.numeric(PAT_MRN_ID),
+    age_visit.cgm = c(scale(age_visit, scale = T)),
+    ndvi.cgm = c(scale(ndvi, scale = T)),
+    avgDailyPM.cgm = c(scale(avgDailyPM, scale = T))
+  ) %>%
+  group_by(RACE) %>%
+  mutate(ndvi.cwc = c(scale(ndvi, scale = T)),
+         avgDailyPM.cwc = c(scale(avgDailyPM, scale = T))) %>%
+  ungroup()
+```
+
+
+```{r}
+#####use of tstart2,tstop2
+f0=formula(Surv(tstart2, tstop2, edvisit) ~ 1)
+cox.as0<-coxph(formula = f0,data =data)
+
+# f5=formula(Surv(tstart2, tstop2, edvisit) ~ age_visit*GENDER+RACE+hcType+onemore+ndvi+avgDailyPM,type="interval")
+# cox.as5<-coxph(formula = f5,data =data)
+# # summary(cox.as5)
+# 
+# #use of tstart2,tstop2
+# f6=formula(Surv(tstart2, tstop2, edvisit) ~GENDER:age_visit+RACE+hcType+onemore+ndvi+avgDailyPM,type="interval")
+# cox.as6<-coxph(formula = f6,data =data)
+# # summary(cox.as6)
+
+# use of interaction only for ndvi
+f7=formula(Surv(tstart2, tstop2, edvisit) ~ age_visit:GENDER+RACE+RACE:hcType+RACE:onemore+RACE:ndvi+RACE:avgDailyPM,type="interval")
+cox.as7<-coxph(formula = f7,data =data)
+summary(cox.as7)
+
+# use of centered covariates
+f8=formula(Surv(tstart2, tstop2, edvisit) ~ age_visit.cgm:GENDER+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm,type="interval")
+cox.as8<-coxph(formula = f8,data =data)
+summary(cox.as8)
+
+# use of centered covariates  and frailty
+f9=formula(Surv(tstart2, tstop2, edvisit) ~ age_visit.cgm:GENDER+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm+frailty(PAT_MRN_ID),type="interval")
+cox.as9<-coxph(formula = f9,data =data)
+summary(cox.as9)
+
+# use age*comorbidities interaction
+f10=formula(Surv(tstart2, tstop2, edvisit) ~ age_visit.cgm:GENDER+onemore:age_visit.cgm+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm+frailty(PAT_MRN_ID),type="interval")
+cox.as10<-coxph(formula = f10,data =data)
+summary(cox.as10)
+
+
+AIC(cox.as0,cox.as7,cox.as8,cox.as9,cox.as10)
+
+cox.as7%>%
+  tbl_regression(exponentiate = TRUE)
+cox.as8%>%
+  tbl_regression(exponentiate = TRUE)
+cox.as9%>%
+  tbl_regression(exponentiate = TRUE)
+cox.as10%>%
+  tbl_regression(exponentiate = TRUE)
+```
+
+## reversing beta coefficients
+
+```{r}
+logLik(cox.as7)
+logLik(cox.as8) 
+rescale.coefs <- function(beta,mu,sigma) {
+    beta2 <- beta ## inherit names etc.
+    # beta2[-1] <- sigma[1]*beta[-1]/sigma[-1]
+    # cox
+    beta2<- beta/sigma
+    # beta2[1]  <- sigma[1]*beta[1]+mu[1]-sum(beta2[-1]*mu[-1])
+    beta2
+} 
+```
+
+Getting back centered coefficients in cox
+
+```{r}
+cox.as7$coefficients
+cox.as8$coefficients
+
+unsc.coeff <- cox.as7$coefficients[c(
+  "age_visit:GENDERFemale",
+  "age_visit:GENDERMale",
+  "RACEEA:ndvi",
+  "RACEAA:ndvi",
+  "RACEEA:avgDailyPM",
+  "RACEAA:avgDailyPM"
+)]
+
+scal.coeff <- cox.as8$coefficients[c(
+  "age_visit.cgm:GENDERFemale",
+  "age_visit.cgm:GENDERMale",
+  "RACEEA:ndvi.cgm",
+  "RACEAA:ndvi.cgm",
+  "RACEEA:avgDailyPM.cgm",
+  "RACEAA:avgDailyPM.cgm"
+)]
+
+unsc.var<-subset(data,select=c(age_visit,age_visit,ndvi,ndvi,avgDailyPM,avgDailyPM))
+(cm <- colMeans(unsc.var))
+(csd <- apply(unsc.var,2,sd))
+
+exp(unsc.coeff)
+exp(cc <-rescale.coefs(scal.coeff,mu=c(cm),sigma=c(csd)))
+```
+
+
+
+## Stan version 
+
+```{r}
+
+(f9mcmc=formula(Surv(tstart2, tstop2, edvisit) ~GENDER:age_visit.cgm+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm+(1|PAT_MRN_ID2)))
+# when chains>1 r makes use of viewer
+CHAINS <- 4
+CORES <- 4
+ITER <- 1500
+SEED <- 42
+# draw from the prior predictive distribution of the stan_surv survival model
+prior.stan.as <- stan_surv(
+  formula = f9mcmc,
+  data = data,
+  basehaz = "exp",
+  prior_PD = TRUE,
+  iter = ITER,refresh=1500,
+  chains = CHAINS,
+  cores = CORES,
+  seed = SEED)
+
+prior.stan.as2 <- update(prior.stan.as,
+                            prior_intercept = normal(0, 1),
+                            prior = normal(0, .5))
+
+prior.stan.as3 <- update(prior.stan.as,
+                            prior_intercept = cauchy(0,10),
+                            prior = normal(0,.3))
+
+prior.stan.as4 <- update(prior.stan.as,
+                            prior_intercept = cauchy(0,25),
+                            prior = normal(0,.3))
+prior.stan.as5 <- update(prior.stan.as,
+                            prior_intercept = cauchy(0,10),
+                            prior = normal(0,.5))
+prior.stan.as6 <- update(prior.stan.as,
+                            prior_intercept = cauchy(0,20),
+                            prior = normal(0,.5))
+
+```
+
+improving priors:
+
+```{r}
+# extract HR from classical coxph for arm=B
+exp(coef(cox.as9))[1]
+base_cox_hr <- vline_at(exp(coef(cox.as9))[1], color = "green")
+a<-mcmc_hist(prior.stan.as,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors default")
+b<-mcmc_hist(prior.stan.as2,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors N(0,1),N(0,.5))")
+c<-mcmc_hist(prior.stan.as3,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors C(10),N(0,.3))")
+d<-mcmc_hist(prior.stan.as4,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors C(25),N(0,.3))")
+e<-mcmc_hist(prior.stan.as4,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors C(10),N(0,.5))")
+f<-mcmc_hist(prior.stan.as4,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "Priors C(25),N(0,.5))")
+
+a+b+c+d+e+f+plot_layout(ncol = 3)
+```
+
+
+## Sampling exp+mspline
+
+```{r}
+f0
+f8mcmc=formula(Surv(tstart2, tstop2, edvisit) ~GENDER:age_visit.cgm+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm)
+(f9mcmc=formula(Surv(tstart2, tstop2, edvisit) ~GENDER:age_visit.cgm+RACE+RACE:hcType+RACE:onemore+RACE:ndvi.cgm+RACE:avgDailyPM.cgm+(1|PAT_MRN_ID2)))
+# exp
+fit.stan.as.exp.f7 <- update(prior.stan.as2,  
+                             prior_PD = FALSE,
+                             formula=f7,
+                             basehaz = "exp")
+
+fit.stan.as.exp.f8 <- update(prior.stan.as2,  
+                             prior_PD = FALSE,
+                             formula=f8mcmc,
+                             basehaz = "exp")
+
+fit.stan.as.exp.f9 <- update(prior.stan.as2,  
+                             prior_PD = FALSE,
+                             formula=f9mcmc,
+                             basehaz = "exp")
+
+# cubic m-spline tstart2, tstop2
+fit.stan.as.ms10.f7 <- update(fit.stan.as.exp.f7,
+                        basehaz = "ms",
+                        basehaz_ops = list(df = 10))
+
+fit.stan.as.ms10.f8 <- update(fit.stan.as.exp.f8,
+                        basehaz = "ms",
+                        basehaz_ops = list(df = 10))
+fit.stan.as.ms10.f9 <- update(fit.stan.as.exp.f9,
+                        basehaz = "ms",
+                        basehaz_ops = list(df = 10))
+
+fit.stan.as.exp.f0 <- update(prior.stan.as2,  
+                             prior_PD = FALSE,
+                             data=fit.stan.as.ms10.f8$data,
+                             formula=f0,
+                             basehaz = "exp")
+
+fits_stan <- list("exp.f0" = fit.stan.as.exp.f0,
+                  "exp.f7" = fit.stan.as.exp.f7,
+                  "ms10.f7" = fit.stan.as.ms10.f7,
+                  "exp.f8" = fit.stan.as.exp.f8,
+                  "ms10.f8" = fit.stan.as.ms10.f8,
+                  "exp.f9" = fit.stan.as.exp.f9,
+                  "ms10.f9" = fit.stan.as.ms10.f9
+                  )
+
+#Are chains mixing well?
+color_scheme_set("mix-blue-red")
+mcmc_trace(fit.stan.as.exp.f9, 
+           pars=c("RACEAA", "(Intercept)"),
+           facet_args = list(ncol = 1, strip.position = "left")
+           )
+```
+
+
+## Posterior uncertainty intervals
+
+```{r}
+mcmc_post_ci(fit.stan.as.exp.f7,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+mcmc_post_ci(fit.stan.as.ms10.f7,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+mcmc_post_ci(fit.stan.as.exp.f8,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+mcmc_post_ci(fit.stan.as.ms10.f8,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+mcmc_post_ci(fit.stan.as.exp.f9,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+mcmc_post_ci(fit.stan.as.ms10.f9,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+```
+
+
+## Hazard ratio checking
+
+```{r}
+# extract HR from classical coxph for arm=B
+exp(coef(cox.as9))[1]
+base_cox_hr <- vline_at(exp(coef(cox.as9))[1], color = "green")
+
+a<-mcmc_hist(prior.stan.as2,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle="Priors N(0,1),N(0,.5)")
+b<-mcmc_hist(fit.stan.as.exp.f7,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f7 (exp)")
+c<-mcmc_hist(fit.stan.as.ms10.f7,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f7 (ms-10)")
+d<-mcmc_hist(fit.stan.as.exp.f8,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f8 (exp)")
+e<-mcmc_hist(fit.stan.as.ms10.f8,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f8 (ms-10)")
+f<-mcmc_hist(fit.stan.as.exp.f9,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f9 (exp)")
+g<-mcmc_hist(fit.stan.as.ms10.f9,
+             pars = c("RACEAA"),
+             transformations = exp,
+             binwidth = 0.001) + base_cox_hr+labs(subtitle = "f9 (ms-10)")
+
+a+b+c+d+e+f+g+plot_layout(ncol = 4)
+```
+
+
+
+## Hazard baseline
+
+```{r}
+plots <- map(fits_stan,plot)
+
+a<-plots[[1]]+
+  labs(title = "Null")+
+  coord_cartesian(ylim = c(0,.5))+
+  theme(plot.title = element_text(hjust = .5))
+
+b<-plots[[2]]+labs(title = "f8 (exp)")+
+  coord_cartesian(ylim = c(0,.5))+
+  theme(plot.title = element_text(hjust = .5))
+
+c<-plots[[3]]+labs(title = "f8  (ms10)")+
+  coord_cartesian(ylim = c(0,.9))+
+  theme(plot.title = element_text(hjust = .5))
+
+d<-plots[[4]]+labs(title = "f9 (exp)")+
+  coord_cartesian(ylim = c(0,.5))+
+  theme(plot.title = element_text(hjust = .5))
+
+e<-plots[[5]]+labs(title = "f9  (ms10)")+
+  coord_cartesian(ylim = c(0,.9))+
+  theme(plot.title = element_text(hjust = .5))
+a+b+c+d+e
+```
+
+
+# Survival curves: Posterior vs COX PH
+
+Preparing synthetic dataset:
+
+```{r}
+# f9 centered+frailty
+data_test<-data.frame(id=1:4,
+                      RACE = factor(rep(c("AA","EA"),each=2),levels=c("EA","AA")),
+                      hcType=factor("Medicaid",levels=c("Commercial","Medicaid")),
+                      age_visit=rep(median(data$age_visit,na.rm = F),2),
+                      avgDailyPM=median(data$avgDailyPM,na.rm = F),
+                      ndvi=median(data$ndvi,na.rm = F),
+                      age_visit.cgm=rep(median(data$age_visit.cgm,na.rm = F),2),
+                      avgDailyPM.cgm=median(data$avgDailyPM.cgm,na.rm = F),
+                      ndvi.cgm=median(data$ndvi.cgm,na.rm = F),
+                      onemore=rep(c(F,T),2),
+                      GENDER=factor(rep("Male",2),levels=c("Female","Male")),
+                      PAT_MRN_ID2=as.numeric(1)
+                      )
+```
+
+##f7 plot
+
+```{r}
+annoTextS=4
+cbPalette <- c("#E64B35","#d47911", "#4DBBD5", "#009E73")
+grid <- seq(0,60,by=12)
+
+data_test<-data_test %>% 
+  mutate(Strata = paste0(RACE, ifelse(onemore, " Comorbid", " Non-comorbid")))
+ndraws=500
+# already collapsed
+ps<-posterior_survfit(fit.stan.as.ms10.f7,  
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+# prepare HR annotations
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85),
+  label=c("HR AA Comorbid=2.09 (2.02 to 2.16)",
+          "HR EA Comorbid=2.28 (2.21 to 2.35)")
+)
+################ survival curves
+a<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata),
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="A",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+a<-a+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "right",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+a
+#obtain legend object
+legend = get_legend(a)
+a<-a+theme(legend.position = "right")
+################ Risk table as ggplot element
+datatr <- fit.stan.as.ms10.f7$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "right",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+
+(a<-a / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+##f8 plot
+
+```{r}
+# annoTextS=4
+# cbPalette <- c("#E64B35","#d47911", "#4DBBD5", "#009E73")
+# grid <- seq(0,60,by=12)
+# 
+# data_test<-data_test %>% 
+#   mutate(Strata = paste0(RACE, ifelse(onemore, " Comorbid", " Non-comorbid")))
+# ndraws=500
+# # already collapsed
+# ps<-posterior_survfit(fit.stan.as.ms10.f8,  
+#                       newdata = data_test,
+#                       times = 0,
+#                       extrapolate   = T, 
+#                       condition     = FALSE,
+#                       return_matrix = F,
+#                       control = list(edist = 60),
+#                       draws = ndraws)
+# ps<-ps %>% 
+#   left_join(data_test,by="id")
+# # prepare HR annotations
+# text.df<-data.frame(
+#   x=c(15),
+#   y=c(0.95,0.85),
+#   label=c("HR AA Comorbid=1.38 (1.09 to 1.74)",
+#           "HR EA Comorbid=1.63 (1.49 to 1.78)")
+# )
+# ################ survival curves
+# a<-ps %>%as_tibble()%>%
+#   ggplot(aes(x=time,y=median,col=Strata)) +
+#   # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata),
+#   #             # fill = "gray90",
+#   #             alpha=0.2,
+#   #             size=0.0) +
+#   geom_line()+
+#   scale_color_manual(values=cbPalette)+
+#   scale_fill_manual(values = cbPalette)+
+#   scale_x_continuous(breaks = grid)+
+#   labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="A",col="Strata")+
+#   survminer::theme_survminer(base_family = "Times New Roman")
+# a<-a+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+#            size=annoTextS,
+#            hjust=0,family="Times New Roman")+
+#   theme(legend.position = "right",
+#         text=element_text(family="Times New Roman"),
+#         plot.margin = unit(c(0,0,0,0), "cm"))
+# a
+# #obtain legend object
+# legend = get_legend(a)
+# a<-a+theme(legend.position = "right")
+# ################ Risk table as ggplot element
+# datatr <- fit.stan.as.ms10.f8$data %>%   ungroup() %>%
+#   mutate(Strata = factor(
+#     case_when(
+#       RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+#       RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+#       RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+#       RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+#       .default = "other"
+#     )
+#   ))
+# summary(datatr$Strata)
+# patients<-datatr %>% 
+#   group_by(PAT_MRN_ID) %>% 
+#   arrange(tstart2) %>% 
+#   slice_head()
+# riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+#           RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+#           RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+#           RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+#     )
+# 
+# tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+#   label = as.character(value)
+#   ))  +
+#   geom_text(size = 4,family = "Times New Roman")+
+#   coord_cartesian(xlim = c(0,60))+
+#   scale_x_continuous(breaks=grid)+
+#   scale_y_discrete(limits=rev(c(
+#     "AA Comorbid",
+#     "AA Non-Comorbid",
+#     "EA Comorbid",
+#     "EA Non-Comorbid"
+#   )),labels=c("","","",""))+
+#   labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+#   survminer::theme_survminer(base_family = "Times New Roman")+
+#   theme(legend.position = "right",
+#         text = element_text(family = "Times New Roman"),
+#         axis.text.y = element_text( hjust = 1 ),
+#         axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+#         axis.ticks.length.y = unit(15, "pt"),
+#         plot.margin = unit(c(0,0,0,0), "cm"))
+# 
+# (a<-a / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+##f9 plot
+
+```{r}
+annoTextS=4
+cbPalette <- c("#E64B35","#d47911", "#4DBBD5", "#009E73")
+grid <- seq(0,60,by=12)
+
+data_test<-data_test %>% 
+  mutate(Strata = paste0(RACE, ifelse(onemore, " Comorbid", " Non-comorbid")))
+ndraws=500
+# already collapsed
+ps<-posterior_survfit(fit.stan.as.ms10.f9,  
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+# prepare HR annotations
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85,0.75),
+  label=c("HR AA=1.16 (1.07 to 1.25)",
+          "HR AA Comorbid=1.56 (1.48 to 1.64)",
+          "HR EA Comorbid=1.42 (1.35 to 1.51)")
+)
+################ survival curves
+a<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata),
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="A",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+a<-a+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "right",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+a
+#obtain legend object
+legend = get_legend(a)
+a<-a+theme(legend.position = "right")
+################ Risk table as ggplot element
+datatr <- fit.stan.as.ms10.f9$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "right",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+
+(a<-a / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+
+
+
+
+
+# Hazard for data_test
+
+```{r}
+(data_test<-data.frame(RACE = rep(c("AA","EA"),each=500),
+                      age_visit=median(data$age_visit,na.rm=T),
+                      dep_index=median(data$dep_index,na.rm=T),
+                      avgDailyPM=median(data$avgDailyPM,na.rm=T),
+                      ndvi=median(data$ndvi,na.rm=T),
+                      onemore=rep(c(F,T),each=1000),
+                      GENDER="Male",
+                      time=rep(seq(0,60,length.out=500),4)
+))
+
+ndraws=1000
+# already collapsed
+ps1<-posterior_survfit(fit.stan.as.exp,newdata = data_test,extrapolate = F,times = "time",type = "haz",
+                      draws = ndraws,return_matrix = F)
+ps3<-posterior_survfit(fit.stan.as.ms10,newdata = data_test,extrapolate = F,times = "time",type = "haz",
+                      draws = ndraws,return_matrix = F)
+
+ps1<-ps1 %>% 
+  mutate(RACE=rep(c("AA","EA","AA","EA"),each=500),
+         onemore=rep(c("No","Yes"),each=1000))
+
+ps3<-ps3 %>% 
+  mutate(RACE=rep(c("AA","EA","AA","EA"),each=500),
+         onemore=rep(c("No","Yes"),each=1000))
+
+summary(factor(ps3$RACE))
+
+
+a<-ps1 %>% as_tibble()%>%
+  filter(RACE %in% c("AA","EA")) %>% 
+  ggplot(aes(x=time,y=median,col=RACE,lty=onemore)) +
+  geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub), fill = "gray90",size=0.1) +
+  geom_line()+labs(x="Time (months)",y="Hazard rate",title="Constant (1000 draws)",lty="Comorbidities")+
+  coord_cartesian(ylim = c(0,.09))+
+  theme(legend.position = "none",plot.title = element_text(hjust = .5))+
+  theme_minimal()
+
+c<-ps3 %>% as_tibble()%>%
+  filter(RACE %in% c("AA","EA")) %>% 
+  ggplot(aes(x=time,y=median,col=RACE,lty=onemore))+
+  geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub), fill = "gray90",size=0.1) +
+  geom_line()+labs(x="Time (months)",y="",subtitle ="Hazard rate",lty="Comorbidities")+
+  # coord_cartesian(ylim = c(0,.09))+
+  theme(legend.position = "right",plot.title = element_text(hjust = .5))+
+  theme_minimal()
+c
+a+c+plot_layout(guides = 'collect')
+aa+c+plot_layout(guides = 'collect')
+
+
+```
+
+
+## RMST for M-Splines model
+
+```{r}
+data_test<-data.frame(id=1:2,
+                      RACE = factor(c("AA","EA"),levels=c("EA","AA")),
+                      hcType=factor(c("Medicaid","Medicaid"),levels=c("Commercial","Medicaid")),
+                      age_visit=median(data$age_visit,na.rm = F),
+                      avgDailyPM=median(data$avgDailyPM,na.rm = F),
+                      ndvi=median(data$ndvi,na.rm = F),
+                      age_visit.cgm=median(data$age_visit.cgm,na.rm = F),
+                      avgDailyPM.cgm=median(data$avgDailyPM.cgm,na.rm = F),
+                      ndvi.cgm=median(data$ndvi.cgm,na.rm = F),
+                      onemore=c(F,F),
+                      GENDER=factor(rep("Male",2),levels=c("Female","Male")),
+                      PAT_MRN_ID2=as.numeric(1)
+                      )
+tau <- c(12, 60)
+
+rmst.as <-
+  map(tau,
+      ~ rmst_check_plot(
+        fit.stan.as.ms10.f9,
+        data_test,
+        tau = .
+      ))
+ndig=1
+rmst.table={}
+for(i in 1:length(tau)) {
+  aa=paste0(
+    round(median(rmst.as[[i]][[1]]$rmstAA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$rmstAA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$rmstAA,prob=c(0.975)),ndig),
+    ")"
+  )
+  ea=paste0(
+    round(median(rmst.as[[i]][[1]]$rmstEA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$rmstEA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$rmstEA,prob=c(0.975)),ndig),
+    ")"
+  )
+  diff=paste0(
+    round(median(rmst.as[[i]][[1]]$diffAA_EA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$diffAA_EA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$diffAA_EA,prob=c(0.975)),ndig),
+    ")"
+  )
+  obs=data.frame(tau=tau[i],
+                   RMST.AA=aa,
+                 RMST.EA=ea,
+                 RMST.diff=diff
+                 )
+  rmst.table<-rbind(rmst.table,obs)
+}
+rmst.table%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+# join all 3 measures
+rmst.as.gg<-rbind(
+    rmst.as[[1]][[1]],
+    rmst.as[[2]][[1]]#,
+    # rmst.ar[[3]][[1]]
+    )
+rmst.as.gg$tau<-factor(as.character(rmst.as.gg$tau),levels=c("12","60"))
+# wide to long for easy manipulation
+rmst.as.gg<-gather(rmst.as.gg,condition,time,rmstAA:ratioAA_EA)
+
+a<-ggplot() +
+  geom_point(
+    data = rmst.as.gg %>% filter(condition %in% c("rmstAA", "rmstEA")),
+    aes(x = tau, y = time, group = condition,col=condition),
+    position = "jitter",
+    alpha = 0.05,
+    size = 0.01
+  ) +
+  geom_boxplot()+
+  stat_summary(
+    # data=aa,
+               # aes(x=tau,y=time,col=condition),
+               fun=mean,
+               geom="line"
+               )+
+  labs(y = "Time-free readmission",col="Group") + theme_bw()
+a
+
+bayesplot_grid(
+    a,
+    rmst.as[[1]]$p3,
+    rmst.as[[2]]$p3,
+    # rmst.ar[[3]]$p3,
+    grid_args = list(ncol = 2),
+    # titles = paste0("RMST (tau=", tau, ")"),
+    # subtitles = rep("with medians and 95% CI", 4)
+    subtitles = c("Time-free evolution","Tau=12","Tau=60")
+    )
+```
+
+
+
+
+When comparing with comorbid.
+
+```{r}
+data_test<-data.frame(id=1:2,
+                      RACE = factor(c("AA","EA"),levels=c("EA","AA")),
+                      hcType=factor(c("Medicaid","Medicaid"),levels=c("Commercial","Medicaid")),
+                      age_visit=median(data$age_visit,na.rm = F),
+                      avgDailyPM=median(data$avgDailyPM,na.rm = F),
+                      ndvi=median(data$ndvi,na.rm = F),
+                      age_visit.cgm=median(data$age_visit.cgm,na.rm = F),
+                      avgDailyPM.cgm=median(data$avgDailyPM.cgm,na.rm = F),
+                      ndvi.cgm=median(data$ndvi.cgm,na.rm = F),
+                      onemore=c(T,T),
+                      GENDER=factor(rep("Male",2),levels=c("Female","Male")),
+                      PAT_MRN_ID2=as.numeric(1)
+                      )
+
+tau <- c(12, 60)
+
+rmst.as <-
+  map(tau,
+      ~ rmst_check_plot(
+        fit.stan.as.ms10.f9,
+        data_test,
+        tau = .
+      ))
+ndig=1
+rmst.table={}
+for(i in 1:length(tau)) {
+  aa=paste0(
+    round(median(rmst.as[[i]][[1]]$rmstAA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$rmstAA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$rmstAA,prob=c(0.975)),ndig),
+    ")"
+  )
+  ea=paste0(
+    round(median(rmst.as[[i]][[1]]$rmstEA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$rmstEA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$rmstEA,prob=c(0.975)),ndig),
+    ")"
+  )
+  diff=paste0(
+    round(median(rmst.as[[i]][[1]]$diffAA_EA),ndig),
+    " (",
+    round(quantile(rmst.as[[i]][[1]]$diffAA_EA,prob=c(0.025)),ndig),
+    " to ",
+    round(quantile(rmst.as[[i]][[1]]$diffAA_EA,prob=c(0.975)),ndig),
+    ")"
+  )
+  obs=data.frame(tau=tau[i],
+                   RMST.AA=aa,
+                 RMST.EA=ea,
+                 RMST.diff=diff
+                 )
+  rmst.table<-rbind(rmst.table,obs)
+}
+rmst.table%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+# join all 3 measures
+rmst.as.gg<-rbind(
+    rmst.as[[1]][[1]],
+    rmst.as[[2]][[1]]#,
+    # rmst.ar[[3]][[1]]
+    )
+rmst.as.gg$tau<-factor(as.character(rmst.as.gg$tau),levels=c("12","60"))
+# wide to long for easy manipulation
+rmst.as.gg<-gather(rmst.as.gg,condition,time,rmstAA:ratioAA_EA)
+
+a<-ggplot() +
+  geom_point(
+    data = rmst.as.gg %>% filter(condition %in% c("rmstAA", "rmstEA")),
+    aes(x = tau, y = time, group = condition,col=condition),
+    position = "jitter",
+    alpha = 0.05,
+    size = 0.01
+  ) +
+  geom_boxplot()+
+  stat_summary(
+    # data=aa,
+               # aes(x=tau,y=time,col=condition),
+               fun=mean,
+               geom="line"
+               )+
+  labs(y = "Time-free readmission",col="Group") + theme_bw()
+a
+
+bayesplot_grid(
+    a,
+    rmst.as[[1]]$p3,
+    rmst.as[[2]]$p3,
+    # rmst.ar[[3]]$p3,
+    grid_args = list(ncol = 2),
+    # titles = paste0("RMST (tau=", tau, ")"),
+    # subtitles = rep("with medians and 95% CI", 4)
+    subtitles = c("Time-free evolution","Tau=12","Tau=60")
+    )
+```
+
+
+
+## Validation
+
+
+
+### C-Index
+
+```{r}
+ndraws=500
+data_test<-fit.stan.as.exp.f4$data
+data_test$coxlp.f4<-predict(cox.as4,newdata = data_test,"lp")
+data_test$coxlp.f7<-predict(cox.as5,newdata = data_test,"lp")
+
+
+#survival=exp(expected)
+data_test$coxsurv.f4<-predict(cox.as4,newdata = data_test,"survival")
+data_test$coxsurv.f7<-predict(cox.as5,newdata = data_test,"survival")
+
+data_test$expsurv.f4<-posterior_survfit(fit.stan.as.exp.f4,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="surv",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+data_test$expsurv.f7<-posterior_survfit(fit.stan.as.exp.f7,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="surv",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+
+data_test$exploghaz.f4<-posterior_survfit(fit.stan.as.exp.f4,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="loghaz",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+
+data_test$exploghaz.f7<-posterior_survfit(fit.stan.as.exp.f7,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="loghaz",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+
+data_test$msloghaz10.f4<-posterior_survfit(fit.stan.as.ms10.f4,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="loghaz",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+data_test$msloghaz10.f7<-posterior_survfit(fit.stan.as.ms10.f7,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="loghaz",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+
+data_test$mssurv10.f4<-posterior_survfit(fit.stan.as.ms10.f4,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="surv",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+data_test$mssurv10.f7<-posterior_survfit(fit.stan.as.ms10.f7,
+                      newdata = data_test,
+                      extrapolate = F,
+                      type="surv",
+                      draws = ndraws,return_matrix = F,
+                      times       = "tstart",
+                      last_time   = "tstop")$median
+#f4
+pairs(~coxlp.f4+exploghaz.f4+msloghaz10.f4, data_test,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth)
+
+pairs(~coxsurv.f4+expsurv.f4+mssurv10.f4, data_test,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth)
+#f5
+pairs(~coxlp.f7+exploghaz.f7+msloghaz10.f7, data_test,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth)
+
+pairs(~coxsurv.f7+expsurv.f7+mssurv10.f7, data_test,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth)
+```
+
+f4
+
+```{r}
+#data_test$mstime<-expre$time
+y_test <- Surv(data_test$tstart,
+               data_test$tstop,
+               data_test$edvisit)
+
+# cindex for linear predictor (log hazard)
+concordance(y_test~data_test$coxlp.f4,reverse = T) #it works with risk
+concordance(y_test~data_test$exploghaz.f4,data = data_test,reverse = T)
+concordance(y_test~data_test$msloghaz10.f4,data = data_test,reverse = T)
+
+```
+
+f5
+
+```{r}
+#data_test$mstime<-expre$time
+y_test <- Surv(data_test$tstart2,
+               data_test$tstop2,
+               data_test$edvisit)
+
+# cindex for linear predictor (log hazard)
+concordance(y_test~data_test$coxlp.f7,reverse = T) #it works with risk
+concordance(y_test~data_test$exploghaz.f7,data = data_test,reverse = T)
+concordance(y_test~data_test$msloghaz10.f7,data = data_test,reverse = T)
+```
+
+
+### Calibration plots
+
+f4 
+
+```{r}
+#fixed time
+times = as.double(seq(5, 60, 10))
+
+summary(data_test$tstart)
+#most common time slots
+times2<-data_test %>% 
+  dplyr::filter(tstart>0.0) %>% 
+  mutate(ints = cut(tstart ,
+                    breaks = seq(0, 60, 10),
+                    include.lowest = FALSE,
+                    right = FALSE)) %>% 
+  dplyr::group_by(ints,tstart) %>% 
+  dplyr::summarise(myn=n()) %>%  
+  slice_max(myn, with_ties = F)
+times2
+times2<-times2%>% 
+  pull(tstart) 
+times
+(times<-times2)
+
+y_test.f4 <- filter(data_test, tstart %in% times) %>% 
+  ungroup() %>% 
+  select(c("tstart","tstop","edvisit")) 
+
+```
+
+
+```{r}
+res<-calibrate(data = data_test,times = times,y = y_test.f4,
+               tstart_col = "tstart",tstop_col ="tstop",status_col = "edvisit",
+               n_groups = 10,surv_col = "mssurv10.f4" )
+
+autoplot(res)
+```
+
+f5
+
+```{r}
+#fixed time
+times = as.double(seq(5, 60, 10))
+
+summary(data_test$tstart2)
+#most common time slots
+times2<-data_test %>% 
+  dplyr::filter(tstart2>0.0) %>% 
+  mutate(ints = cut(tstart2 ,
+                    breaks = seq(0, 60, 10),
+                    include.lowest = FALSE,
+                    right = FALSE)) %>% 
+  dplyr::group_by(ints,tstart2) %>% 
+  dplyr::summarise(myn=n()) %>%  
+  slice_max(myn, with_ties = F)
+times2
+times2<-times2%>% 
+  pull(tstart2) 
+times
+(times<-times2)
+
+y_test.f7 <- filter(data_test, tstart2 %in% times) %>% 
+  ungroup() %>% 
+  select(c("tstart2","tstop2","edvisit"))
+```
+
+
+```{r}
+res<-calibrate(data = data_test,times = times,y = y_test.f7,
+               tstart_col = "tstart2",tstop_col ="tstop2",status_col = "edvisit",
+               n_groups = 10,surv_col = "mssurv10.f7" )
+
+autoplot(res)
+```
+
+
+
+
+```{r}
+# save.image("output/cchmc.as.v13.RData")
+
+save(fit.stan.as.exp.f7,file="models/as.model.exp.f7.v13.RData")
+save(fit.stan.as.ms10.f7,file="models/as.model.ms10.f7.v13.RData")
+save(fit.stan.as.exp.f8,file="models/as.model.exp.f8.v13.RData")
+save(fit.stan.as.ms10.f8,file="models/as.model.ms10.f8.v13.RData")
+save(fit.stan.as.exp.f9,file="models/as.model.exp.f9.v13.RData")
+save(fit.stan.as.ms10.f9,file="models/as.model.ms10.f9.v13.RData")
+```

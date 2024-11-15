@@ -1,0 +1,394 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+v1
+Use of atm_survival_v8.RData with improved inclusion criteria
+t-test reemplazados por lmm para time-varying covariates
+code clean-up
+
+v2
+use of tstart2,tstop2
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = FALSE,message=FALSE,warning = F,results = F)
+rm(list = ls())
+```
+
+
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(tidyverse)
+library(foreign)
+library(lubridate)
+library(tableone)
+library(nlme)
+library(survival)
+library(ggsurvfit)
+library(ggpubr)
+cbPalette <- c("#999999",  "#E64B35", "#4DBBD5", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+load("data/atm_survival_v8.RData")
+ad_wide$myICD<-"L20"
+as_wide$myICD<-"J45"
+ar_wide$myICD<-"J30"
+fa_wide$myICD<-"Z91"
+eoe_wide$myICD<-"K20"
+all_diseases<-rbind(ad_wide,as_wide,ar_wide,fa_wide,eoe_wide)%>% 
+  mutate(
+    comorbidities=rowSums(across(c(AD,AS,AR,FA,EoE))),
+    onemore=if_else(comorbidities>=2,"Yes","No")
+  ) %>% 
+  filter(edvisit==1)
+
+#799820
+#213807
+# 69895 censoring
+# 283702 all
+
+```
+
+  
+## Censoring  
+
+Censoring characterization for RMST
+
+### AD
+
+```{r}
+# Obtained from posterior_survfit
+5602+7534+12864+11804+475
+```
+
+
+```{r}
+months <-0:59
+ad_total<-ad_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(ad_total)
+
+temp_ad<-ad_total
+for (i in months){
+  cens<-ad_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart2>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("{i}":=n())
+  
+  temp_ad<-temp_ad %>%
+    left_join(cens,by="RACE")
+}
+temp_ad
+temp_ad2<-as.matrix(t(temp_ad))
+temp_ad3<-data.frame(month=months,
+                     AA=as.numeric(temp_ad2[3:nrow(temp_ad2),1]),
+                     EA=as.numeric(temp_ad2[3:nrow(temp_ad2),2])
+                     )
+temp_ad3$AA_perc<-1-round(temp_ad3$AA/ad_total$total[1],2)
+temp_ad3$EA_perc<-1-round(temp_ad3$EA/ad_total$total[2],2)
+temp_ad4<-gather(temp_ad3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+a<-ggplot(temp_ad4,aes(x=month,y=perc,col=race)) +
+  geom_line(size = 1) +
+
+  scale_x_continuous(breaks = c(1:60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="A",x="", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"),
+        plot.margin=unit(c(0,1,0,3.1),"cm"))
+a
+
+
+p2 <- ggtexttable(temp_ad)
+
+ggarrange(a, p2,ncol = 1, nrow = 2,
+                  heights = c(10,3))
+
+```
+
+
+```{r}
+# library(ggpp)
+# library(survminer)
+# df <- data.frame(col1 = 1:3, col2 = c("one", "two", "three"))
+# 
+# ### Plotting the KM survival
+# fit <- survfit(Surv(time, status) ~ sex, data = lung)
+# p <- ggsurvplot(fit, data = lung) 
+# 
+# ### Adding your table to the ggsurvplot item
+# p$plot + ggpp::annotate(geom = "table", x = 700, y = 0.9, label = list(df))
+```
+
+### FA
+
+```{r}
+months <-0:59
+fa_total<-fa_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(fa_total)
+
+temp_fa<-fa_total
+for (i in months){
+  cens<-fa_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart2>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("n.{i}":=n())
+  
+  temp_fa<-temp_fa %>%
+    left_join(cens,by="RACE")
+}
+temp_fa
+temp_fa2<-as.matrix(t(temp_fa))
+temp_fa3<-data.frame(month=months,
+                     AA=as.numeric(temp_fa2[3:nrow(temp_fa2),1]),
+                     EA=as.numeric(temp_fa2[3:nrow(temp_fa2),2])
+                     )
+temp_fa3$AA_perc<-1-round(temp_fa3$AA/fa_total$total[1],2)
+temp_fa3$EA_perc<-1-round(temp_fa3$EA/fa_total$total[2],2)
+temp_fa4<-gather(temp_fa3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+b<-ggplot(temp_fa4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="B",x="", y="",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+b
+```
+
+### Asthma
+
+```{r}
+months <-0:59
+as_total<-as_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(as_total)
+
+temp_as<-as_total
+for (i in months){
+  cens<-as_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart2>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("n.{i}":=n())
+  
+  temp_as<-temp_as %>%
+    left_join(cens,by="RACE")
+}
+temp_as
+temp_as2<-as.matrix(t(temp_as))
+temp_as3<-data.frame(month=months,
+                     AA=as.numeric(temp_as2[3:nrow(temp_as2),1]),
+                     EA=as.numeric(temp_as2[3:nrow(temp_as2),2])
+                     )
+temp_as3$AA_perc<-1-round(temp_as3$AA/as_total$total[1],2)
+temp_as3$EA_perc<-1-round(temp_as3$EA/as_total$total[2],2)
+temp_as4<-gather(temp_as3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+c<-ggplot(temp_as4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="C",x="", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+c
+```
+
+
+### AR
+
+```{r}
+months <-0:59
+ar_total<-ar_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(ar_total)
+
+temp_ar<-ar_total
+for (i in months){
+  cens<-ar_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart2>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("n.{i}":=n())
+  
+  temp_ar<-temp_ar %>%
+    left_join(cens,by="RACE")
+}
+temp_ar
+temp_ar2<-as.matrix(t(temp_ar))
+temp_ar3<-data.frame(month=months,
+                     AA=as.numeric(temp_ar2[3:nrow(temp_ar2),1]),
+                     EA=as.numeric(temp_ar2[3:nrow(temp_ar2),2])
+                     )
+temp_ar3$AA_perc<-1-round(temp_ar3$AA/ar_total$total[1],2)
+temp_ar3$EA_perc<-1-round(temp_ar3$EA/ar_total$total[2],2)
+temp_ar4<-gather(temp_ar3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+```{r}
+d<-ggplot(temp_ar4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="D",x="Time (months)", y="",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.position = "none",
+        text=element_text(family="Times New Roman"))
+d
+```
+
+### EoE
+
+```{r}
+months <-0:59
+eoe_total<-eoe_wide %>%
+  group_by(PAT_MRN_ID) %>% 
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  filter(row_number()==n()) %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(total=n())
+t(eoe_total)
+
+temp_eoe<-eoe_total
+for (i in months){
+  cens<-eoe_wide %>%
+    group_by(PAT_MRN_ID) %>% 
+    arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+    filter(row_number()==n()) %>% 
+    filter(tstart2>=i) %>% 
+    ungroup() %>% 
+    group_by(RACE) %>% 
+    summarise("n.{i}":=n())
+  
+  temp_eoe<-temp_eoe %>%
+    left_join(cens,by="RACE")
+}
+temp_eoe
+temp_eoe2<-as.matrix(t(temp_eoe))
+temp_eoe3<-data.frame(month=months,
+                     AA=as.numeric(temp_eoe2[3:nrow(temp_eoe2),1]),
+                     EA=as.numeric(temp_eoe2[3:nrow(temp_eoe2),2])
+                     )
+temp_eoe3$AA_perc<-1-round(temp_eoe3$AA/eoe_total$total[1],2)
+temp_eoe3$EA_perc<-1-round(temp_eoe3$EA/eoe_total$total[2],2)
+temp_eoe4<-gather(temp_eoe3, race, perc, AA_perc:EA_perc, factor_key=TRUE) %>% 
+  mutate(race=recode(race,`AA_perc`="AA",`EA_perc`="EA"))
+```
+
+
+```{r}
+e<-ggplot(temp_eoe4)+
+  geom_point(aes(x=month,y=perc,col=race)) +
+  scale_x_continuous(breaks = c(12,24,36,48,60))+
+  scale_color_manual(values = c("AA" = cbPalette[2],
+                                "EA" = cbPalette[3])) +
+  labs(subtitle="E",x="Time (months)", y="Censoring (%)",col="Race")+
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'white', 
+                                        color = 'white'),
+        legend.key=element_blank(),
+        legend.key.size = unit(6,"point"),
+        legend.title = element_text(size=13),
+        legend.text=element_text(size=13),
+        text=element_text(family="Times New Roman"))
+## Function to extract legend
+get_legend <- function(a.gplot){ 
+    tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+    legend <- tmp$grobs[[leg]] 
+    legend
+} 
+
+legend<-get_legend(e)
+e<-e+theme(legend.position = "none")
+
+
+```
+
+
+```{r}
+f_censoring<-(a+b)/(c+d)/(e+legend)
+f_censoring
+
+ggsave(filename = "images/fs.censoring.v2.png", f_censoring,# en cm mejor para mantener el tamanho
+  width=2200,height = 2600, dpi = 300, units = "px", device='png')
+```
+
+```{r}
+
+```
+

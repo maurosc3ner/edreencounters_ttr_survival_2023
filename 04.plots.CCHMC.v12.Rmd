@@ -1,0 +1,1614 @@
+---
+title: "Untitled"
+author: "Esteban Correa"
+date: "2022-08-04"
+output: html_document
+---
+
+-v2 
+updated to run Apple Silicon
+
+-v3
+code reorganized, 
+Neat incidence curve using geom_textpath
+
+v5
+drop of deprivation index, EoE added to comorbidities
+
+v6
+Sankey diagram added again
+
+v7
+Use of atm_survival_v8.RData with improved inclusion criteria
+t-test reemplazados por lmm para time-varying covariates
+code clean-up
+survival with formula f7
+RMST figure removed 
+
+v8
+new survival with table
+
+v9 
+jaccard plot added to figure 3 panel B
+
+v10
+Include fixes on number at risk counts introduced by ggsurvminer
+Use v12 models (new splines2 and rstanarm versions)
+
+v11
+x-axis rugs added for reviewer comments
+
+v12
+Use v13 models (centered covariates and frailty term)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(rstanarm)
+library(survival)
+library(tidyverse)
+library(patchwork)
+library(bayesplot)
+library(loo)
+library(ggalluvial)
+library(ggraph)
+library(geomtextpath)
+library(tableone)
+
+cbPalette <- c("#999999",  "#E64B35", "#4DBBD5", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+source("helpers.r")
+
+load("data/atm_survival_v8.RData")
+ad_wide$myICD<-"L20"
+fa_wide$myICD<-"Z91"
+as_wide$myICD<-"J45"
+ar_wide$myICD<-"J30"
+eoe_wide$myICD<-"K20"
+all_diseases<-rbind(ad_wide,as_wide,ar_wide,fa_wide,eoe_wide)%>% 
+  mutate(
+    comorbidities=rowSums(across(c(AD,AS,AR,FA,EoE))),
+    onemore=if_else(comorbidities>=2,"Yes","No")
+  )%>% 
+  filter(edvisit==1) %>% 
+  ungroup() %>%
+  mutate(PAT_MRN_ID2=as.numeric(PAT_MRN_ID),
+    age_visit.cgm = c(scale(age_visit, scale = T)),
+    ndvi.cgm = c(scale(ndvi, scale = T)),
+    avgDailyPM.cgm = c(scale(avgDailyPM, scale = T))
+  ) %>%
+  group_by(RACE) %>%
+  mutate(ndvi.cwc = c(scale(ndvi, scale = T)),
+         avgDailyPM.cwc = c(scale(avgDailyPM, scale = T))) %>%
+  ungroup()
+
+```
+
+
+
+```{r}
+
+
+data.ad<-ad_wide %>%
+  mutate(GENDER=factor(GENDER),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(FA,AS,AR,EoE))),
+    onemore=if_else(comorbidities>=1,TRUE,FALSE)
+  )%>%
+  arrange(PAT_MRN_ID,enum)
+
+# Note: imputation of covariates for last visit is required to enable right censoring
+data.as<-as_wide %>%
+  mutate(GENDER=factor(GENDER),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(AD,AR,FA,EoE))), # except Asthma
+    onemore=if_else(comorbidities>=1,TRUE,FALSE)
+  )%>% 
+  arrange(PAT_MRN_ID,enum)
+
+data.ar<-ar_wide %>%
+  mutate(GENDER=factor(GENDER),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(AD,AS,FA,EoE))), #except rhinitis
+    onemore=if_else(comorbidities>=1,TRUE,FALSE)
+  )%>% 
+  arrange(PAT_MRN_ID,enum)
+
+data.fa<-fa_wide %>%
+  mutate(GENDER=factor(GENDER),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(AD,AS,AR,EoE))), #except FA
+    onemore=if_else(comorbidities>=1,TRUE,FALSE) 
+  )%>% 
+  arrange(PAT_MRN_ID,enum)
+
+data.eoe<-eoe_wide %>%
+  mutate(GENDER=factor(GENDER),
+         RACE = factor(
+    recode(
+      RACE,
+      `WHITE` = "EA",
+      `BLACK OR AFRICAN AMERICAN` = "AA"
+    ),
+    levels = c("EA", "AA")
+  )) %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(VISIT_DATE2) %>%
+  mutate(
+    lon = if_else(is.na(lon), lag(lon), lon),
+    census_tract_id = if_else(
+      is.na(census_tract_id),
+      lag(census_tract_id),
+      census_tract_id
+    ),
+    county_id = if_else(is.na(county_id), lag(county_id), county_id),
+    dep_index = if_else(is.na(dep_index), lag(dep_index), dep_index),
+    avgDailyPM = if_else(is.na(avgDailyPM), lag(avgDailyPM), avgDailyPM),
+    ndvi = if_else(is.na(ndvi), lag(ndvi), ndvi),
+    hcType = if_else(is.na(hcType), lag(hcType), hcType),
+    comorbidities=rowSums(across(c(AD,AS,AR,FA))), #except eoe
+    onemore=if_else(comorbidities>=1,TRUE,FALSE)
+  )%>% 
+  arrange(PAT_MRN_ID,enum)
+
+
+```
+
+
+
+
+
+
+# Figure 1: 
+
+
+
+## Incidence graph
+
+
+```{r}
+firstEvent.ad<-ad_wide %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(row_number()==1) %>% 
+  mutate(ICD="AD")%>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  mutate(age_on=round(mean(age_visit),1))
+  
+firstEvent.as<-as_wide %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(row_number()==1) %>% 
+  mutate(ICD="Asthma")%>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  mutate(age_on=round(mean(age_visit),1))
+
+firstEvent.ar<-ar_wide %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(row_number()==1) %>% 
+  mutate(ICD="AR")%>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  mutate(age_on=round(mean(age_visit),1))
+         
+firstEvent.fa<-fa_wide %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(row_number()==1) %>% 
+  mutate(ICD="FA")%>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  mutate(age_on=round(mean(age_visit),1))
+
+firstEvent.eoe<-eoe_wide %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(row_number()==1) %>% 
+  mutate(ICD="EoE") %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  mutate(age_on=round(mean(age_visit),1))
+
+firstEvent.all<-rbind(firstEvent.ad,firstEvent.as,firstEvent.ar,firstEvent.fa,firstEvent.eoe) %>% 
+  mutate(ICD=factor(recode(ICD,`AS`="Asthma"),
+                         levels = c("AD","FA", "Asthma", "AR","EoE"))
+         ) 
+```
+
+plot version b
+
+```{r}
+
+race_names <- c(
+  'AA'="African american",
+  'EA'="European american"
+)
+
+# races horizontal
+panelA<-ggplot(firstEvent.all, aes(x = age_visit, colour = ICD)) +
+  geom_density(size = 0.8,key_glyph=draw_key_path) +
+  # geom_textdensity(aes(hjust=ICD),size = 3.5, fontface = 2,vjust = 0.3) +
+  scale_hjust_discrete()+
+  labs(y="Incidence density of disease",x="Age of onset (years)",col="Allergic\nDisease",fill="",subtitle = "A") +
+  theme_minimal()+
+  # theme(legend.position = c(0.94,0.8),text=element_text(family="Times New Roman"))+
+  theme(legend.position = "right",text=element_text(family="Times New Roman"))+
+    facet_wrap(RACE~., 
+             labeller=labeller(RACE=race_names)
+             )
+panelA
+
+
+
+# ggsave(filename = "images/figure2a_v2.png", f2,# en cm mejor para mantener el tamanho
+# width=2200,height = 1600, dpi = 300, units = "px", device='png')
+```
+
+version C separated
+
+```{r}
+# races horizontal
+panelA.aa<-ggplot(firstEvent.all%>% 
+  filter(RACE=="AA"), aes(x = age_visit, colour = ICD)) +
+  geom_density(size = 0.8,key_glyph=draw_key_path) +
+  # geom_textdensity(aes(hjust=ICD),size = 3.5, fontface = 2,vjust = 0.3) +
+  scale_hjust_discrete()+ylim(0,0.3)+
+  labs(y="Incidence density of disease",x="Age (years)",col="Allergic\nDisease",fill="",title="A",subtitle = "African American") +
+  theme_minimal()+
+  # theme(legend.position = c(0.94,0.8),text=element_text(family="Times New Roman"))+
+  theme(legend.position = "right",text=element_text(family="Times New Roman"))
+leg1<-get_legend(panelA.aa)
+panelA.aa<-panelA.aa+theme(legend.position = "none")
+
+
+panelA.ea<-ggplot(firstEvent.all%>% 
+  filter(RACE=="EA"), aes(x = age_visit, colour = ICD)) +
+  geom_density(size = 0.8,key_glyph=draw_key_path) +
+  # geom_textdensity(aes(hjust=ICD),size = 3.5, fontface = 2,vjust = 0.3) +
+  scale_hjust_discrete()+ylim(0,0.3)+
+  labs(y="",x="Age (years)",col="Allergic\nDisease",fill="",title="",subtitle = "European American") +
+  theme_minimal()+
+  # theme(legend.position = c(0.94,0.8),text=element_text(family="Times New Roman"))+
+  theme(legend.position = "right",text=element_text(family="Times New Roman"))
+panelA<-panelA.aa+panelA.ea+ plot_layout(guides = "collect") 
+panelA
+```
+
+
+
+# disease progression
+
+Using dense rank to deal with ties
+https://stackoverflow.com/questions/46981273/find-the-top-n-rows-with-ties-in-r-using-head
+
+
+```{r}
+#first diagnosis of each disease
+diag10<-all_diseases %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>%
+  distinct(myICD,.keep_all = TRUE)
+
+#mark visits with duplicated dates
+diag11<-diag10 %>%
+  group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  mutate(isDup=duplicated(VISIT_DATE2) | duplicated(VISIT_DATE2, fromLast = TRUE),
+         grp = dense_rank(VISIT_DATE2))
+
+# We deal with ties at first and second visit
+diag12<-diag11 %>%
+  group_by(PAT_MRN_ID) %>%
+  mutate(nVisits=n()) %>% 
+  filter(nVisits >= 2) %>%
+  # filter(grp <= 2) %>%
+  filter(max(grp)==2) %>% 
+  mutate(enum2=factor(paste0("visit","_",comorbidities))) 
+```
+
+
+we can build a graph 
+
+
+```{r}
+a <- c("A", "B")
+b <- c("X", "Y", "Z")
+# Use the outer function to apply the paste function to each pair of elements from a and b
+c <- outer(a, b, paste, sep = "")
+# Print the output vector c
+print(c)
+
+# Use the as.vector function to convert the matrix to a vector
+v <- as.vector(c)
+# Use the matrix function to convert the vector to a one column matrix
+m1 <- matrix(v, ncol = 1)
+# Print the reshaped matrix
+print(m1)
+
+a <- c("A", "B","C")
+b <- c("X")
+outer(a, b, paste, sep = "")
+```
+
+```{r}
+# library(tidyr)
+patoi<-diag12 %>% 
+  distinct(PAT_MRN_ID) %>% 
+  pull(PAT_MRN_ID)
+fromtoDF<-{}
+
+for (i in patoi){
+  # print(i)
+# curPat<-"0000694988"
+# curPat<-"0000801595"
+  tempDF<-filter(diag12,PAT_MRN_ID %in% i)
+  aVec<-list()
+  bVec<-list()
+  for(j in 1:nrow(tempDF)){
+    if (tempDF[j,]$grp==1){
+      aVec<-append(aVec,tempDF[j,]$myICD)
+    }else{
+      bVec<-append(bVec,tempDF[j,]$myICD)
+    }
+  }
+  # print(aVec)
+  # print(bVec)
+  c<-outer(aVec, bVec, paste, sep = "-")
+  # print(c)
+  d<-as.data.frame(matrix2column(c))
+  # print(d)
+  e<-d %>% separate(fromto, sep="-", c("from", "to"))
+  e$PAT_MRN_ID<-i
+  e$RACE<-first(unique(tempDF$RACE))
+  # print(e)
+  fromtoDF<-rbind(fromtoDF,e)
+}
+```
+
+```{r}
+fromtoDF2<-fromtoDF %>%
+  mutate(from=as.factor(recode(from,
+                         `J30`="AR",
+                         `J45`="Asthma",
+                         `K20`="EoE",
+                         `L20`="AD",
+                         `Z91`="FA")),
+         to=as.factor(recode(to,
+                         `J30`="AR",
+                         `J45`="Asthma",
+                         `K20`="EoE",
+                         `L20`="AD",
+                         `Z91`="FA")),
+         )
+
+```
+
+
+Using summary
+
+```{r}
+
+fromtoDF2Sum<-fromtoDF2 %>% 
+  group_by(from,to,RACE) %>% 
+  summarize(freq=n()) %>% 
+  mutate(arc_direction=ifelse(RACE=="AA",-1,1),
+         from=factor(from, ordered = TRUE, 
+                                levels = c("AD","FA","Asthma","AR","EoE")),
+         to=factor(to, ordered = TRUE, 
+                                levels = c("AD","FA","Asthma","AR","EoE")),
+         )
+
+
+```
+
+
+
+
+
+## multimorbidity proportion by race
+
+```{r}
+multim.df.aa<-all_diseases %>% 
+  ungroup() %>% 
+  filter(RACE=="AA") %>% 
+  select(c("AD","FA","AS","AR","EoE"))
+
+multim.df.ea<-all_diseases %>% 
+  ungroup() %>% 
+  filter(RACE=="EA") %>% 
+  select(c("AD","FA","AS","AR","EoE"))
+
+multi.mat.aa<-get_prop_matrix(as.matrix(multim.df.aa),NULL)
+colnames(multi.mat.aa$mat.jaccard)<-c("AD","FA","Asthma","AR","EoE")
+rownames(multi.mat.aa$mat.jaccard)<-c("AD","FA","Asthma","AR","EoE")
+multi.mat.aa
+
+multi.mat.ea<-get_prop_matrix(as.matrix(multim.df.ea),1)
+colnames(multi.mat.ea$mat.jaccard)<-c("AD","FA","Asthma","AR","EoE")
+rownames(multi.mat.ea$mat.jaccard)<-c("AD","FA","Asthma","AR","EoE")
+multi.mat.ea
+```
+
+ 
+
+
+```{r}
+upper_tri.aa <- get_upper_tri(multi.mat.aa$mat.jaccard)
+upper_tri.ea <- get_upper_tri(multi.mat.ea$mat.jaccard)
+
+#long format
+melted_aa <- melt(upper_tri.aa, na.rm = TRUE)
+melted_ea <- melt(upper_tri.ea, na.rm = TRUE)
+
+aa<-ggplot(data = melted_aa, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+  # scale_fill_distiller(palette = "YlOrRd",direction = 1)+
+  scale_fill_gradient2(low = "lightblue", high = "red", mid = "orange", 
+   midpoint = 0.5, limit = c(0,1), space = "Lab", 
+   name="Co-Occurrence\nProportion (%)")+
+  theme_minimal()+ 
+  labs(title="B",subtitle="African American")+
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()+
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 4,family="Times New Roman") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    text=element_text(family="Times New Roman")
+    # legend.position = "bottom",
+    # legend.direction = "horizontal"
+    )+
+    guides(fill = guide_colorbar(barwidth = 1, barheight = 7,
+                  title.position = "top", title.hjust = 0.5))
+aa
+leg<-get_legend(aa)
+aa<-aa+theme(legend.position = "none")
+
+ea<-ggplot(data = melted_ea, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+  # scale_fill_distiller(palette = "YlOrRd",direction = 1)+
+  scale_fill_gradient2(low = "lightblue", high = "red", mid = "orange", 
+   midpoint = 0.5, limit = c(0,1), space = "Lab", 
+   name="Jaccard\nIndex")+
+  theme_minimal()+ 
+  labs(title="", subtitle="European American")+
+  coord_fixed()+
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 4,family="Times New Roman") +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    text=element_text(family="Times New Roman"),
+    legend.position = "right",
+    # legend.direction = "horizontal"
+    )+
+    guides(fill = guide_colorbar(barwidth = 1, barheight = 7,
+                  title.position = "top", title.hjust = 0.5))
+ea
+
+panelB<-aa+ea+plot_layout(guides = "collect") 
+panelB
+```
+
+
+```{r}
+# f2<-panelA/panelB
+ # plot_layout(guides = "collect") 
+f2<-(panelA.aa/aa)|(panelA.ea/ea)
+
+f2
+ggsave(filename = "images/f2_v9.png", f2,# en cm mejor para mantener el tamanho
+  width=2200,height = 2600, dpi = 300, units = "px", device='png')
+ggsave(filename = "images/f2_v9.tif", f2,# en cm mejor para mantener el tamanho
+  width=2200,height = 2600, dpi = 300, units = "px", device='tiff',compression="lzw")
+```
+
+
+##Table S1
+
+```{r}
+fromtoAD<-fromtoDF2 %>% 
+  filter(from == "AD") %>% 
+  mutate(to=factor(to, ordered = TRUE, 
+                                levels = c("AD","FA","Asthma","AR","EoE"))) %>% 
+  mutate(to=droplevels(to))
+
+myVars<-c("to")
+tab <- CreateTableOne(vars = myVars,
+                      # strata = "RACE" ,
+                      data = fromtoAD,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = fromtoAD,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+```
+
+
+```{r}
+fromtoFA<-fromtoDF2 %>% 
+  filter(from == "FA") %>% 
+  mutate(to=factor(to, ordered = TRUE, 
+                   levels = c("AD","FA","Asthma","AR","EoE"))) %>% 
+  mutate(to=droplevels(to))
+
+tab <- CreateTableOne(vars = myVars,
+                      # strata = "RACE" ,
+                      data = fromtoFA,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = fromtoFA,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+```
+
+
+```{r}
+fromtoAS<-fromtoDF2 %>% 
+  filter(from == "Asthma") %>% 
+  mutate(to=factor(to, ordered = TRUE, 
+                   levels = c("AD","FA","Asthma","AR","EoE"))) %>% 
+  mutate(to=droplevels(to))
+
+tab <- CreateTableOne(vars = myVars,
+                      # strata = "RACE" ,
+                      data = fromtoAS,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = fromtoAS,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+```
+
+```{r}
+library(ggraph)
+library(igraph)
+fromtoAR<-fromtoDF2 %>% 
+  filter(from == "AR") %>% 
+  mutate(to=factor(to, ordered = TRUE, 
+                   levels = c("AD","FA","Asthma","AR","EoE"))) %>% 
+  mutate(to=droplevels(to))
+
+tab <- CreateTableOne(vars = myVars,
+                      # strata = "RACE" ,
+                      data = fromtoAR,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = fromtoAR,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+```
+
+
+```{r}
+fromtoEoE<-fromtoDF2 %>% 
+  filter(from == "EoE") %>% 
+  mutate(to=factor(to, ordered = TRUE, 
+                   levels = c("AD","FA","Asthma","AR","EoE"))) %>% 
+  mutate(to=droplevels(to))
+
+tab <- CreateTableOne(vars = myVars,
+                      # strata = "RACE" ,
+                      data = fromtoEoE,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = fromtoEoE,
+                       includeNA = T,
+                          test = T)
+tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+tab2Mat%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F,font="Times New Roman") 
+```
+
+
+
+
+
+## Posterior uncertainty intervals
+
+```{r}
+load("models/ad.model.ms10.f9.v13.RData")
+load("models/fa.model.ms10.f9.v13.RData")
+load("models/as.model.ms10.f9.v13.RData")
+load("models/ar.model.ms10.f9.v13.RData")
+load("models/eoe.model.ms10.f9.v13.RData")
+```
+
+## Correlation
+
+```{r}
+dataCor<-all_diseases %>% 
+  ungroup() %>% 
+  dplyr::select(avgDailyPM,ndvi) %>% 
+  drop_na()
+
+r<-round(cor(dataCor[,"avgDailyPM"],dataCor[,"ndvi"],use = "complete.obs"),3)
+cor.test(dataCor$avgDailyPM, dataCor$ndvi)
+p<-cor.test(dataCor$avgDailyPM, dataCor$ndvi)$p.value
+
+
+ggplot(all_diseases,aes(x=avgDailyPM,y=ndvi))+
+  geom_point(size=0.1,alpha=0.1)+
+  geom_smooth(method="lm", col="blue",se = T) +
+  labs(x="PM2.5 (μm)",y="Greenspace (ndvi)")+
+  annotate("text", x=18, y=0.6, label=paste0("r = ", r), hjust=0) +
+  annotate("text", x=18, y=0.58, label=paste0("p = ", round(p, 3)), hjust=0) +
+  theme_classic() 
+```
+
+
+##Last event
+
+```{r}
+fit.stan.ad.ms10.f7$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  slice_tail() %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())%>% 
+  mutate(total=sum(n))%>% 
+  mutate(prop = 100 * n / sum(n)) %>% 
+  mutate(prop2=round(prop,1),
+         prop2text=paste0(n," (",prop2,")"))
+
+fit.stan.fa.ms10.f7$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  slice_tail() %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())%>% 
+  mutate(total=sum(n))%>% 
+  mutate(prop = 100 * n / sum(n)) %>% 
+  mutate(prop2=round(prop,1),
+         prop2text=paste0(n," (",prop2,")"))
+
+fit.stan.as.ms10.f7$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  slice_tail() %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())%>% 
+  mutate(total=sum(n)) %>% 
+  mutate(prop = 100 * n / sum(n)) %>% 
+  mutate(prop2=round(prop,1),
+         prop2text=paste0(n," (",prop2,")"))
+
+fit.stan.ar.ms10.f7$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  slice_tail() %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(n=n())%>% 
+  mutate(total=sum(n)) %>% 
+  mutate(prop = 100 * n / sum(n)) %>% 
+  mutate(prop2=round(prop,1),
+         prop2text=paste0(n," (",prop2,")"))
+
+fit.stan.eoe.ms10.f7$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  slice_tail() %>% 
+  ungroup() %>% 
+  group_by(RACE) %>% 
+  summarise(n=n()) %>% 
+  mutate(prop = 100 * n / sum(n)) %>% 
+  mutate(prop2=round(prop,1),
+         prop2text=paste0(n," (",prop2,")"))
+
+```
+
+
+## Hazard ratio
+
+### Follow up examination
+
+```{r}
+fu.ad_df<-fit.stan.ad.ms10.f9$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(edvisit==1) %>% 
+  slice_tail() %>% 
+  ungroup()
+summary(fu.ad_df$tstart2)
+hist(fu.ad_df$tstart2,32)
+
+fu.fa_df<-fit.stan.fa.ms10.f9$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(edvisit==1) %>% 
+  slice_tail() %>% 
+  ungroup() 
+summary(fu.fa_df$tstart2)
+
+fu.as_df<-fit.stan.as.ms10.f9$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(edvisit==1) %>% 
+  slice_tail() %>% 
+  ungroup() 
+summary(fu.as_df$tstart2)
+
+fu.ar_df<-fit.stan.ar.ms10.f9$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(edvisit==1) %>% 
+  slice_tail() %>% 
+  ungroup() 
+summary(fu.ar_df$tstart2)
+
+fu.eoe_df<-fit.stan.eoe.ms10.f9$data %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(enum) %>% 
+  filter(edvisit==1) %>% 
+  slice_tail() %>% 
+  ungroup() 
+summary(fu.eoe_df$tstart2)
+```
+
+## Hazard baseline
+
+```{r}
+fits_stan <- list(
+                  "AD" = fit.stan.ad.ms10.f9,
+                  "FA" = fit.stan.fa.ms10.f9,
+                  "Asthma" = fit.stan.as.ms10.f9,
+                  "AR" = fit.stan.ar.ms10.f9,
+                  "EoE" = fit.stan.eoe.ms10.f9
+                  )
+plots <- map(fits_stan,plot)
+
+# v11 now includes geom_rug and follow-up stats
+rug_df <-
+  fit.stan.ad.ms10.f9$data %>% 
+  mutate(edvisit = ifelse(edvisit == 1, tstart2, NA))
+subt.lbl<-paste0("A\n Min: ",round(min(fu.ad_df$tstart2),1),
+       ", Mean: ",round(mean(fu.ad_df$tstart2),1),
+       ", Max: ",round(max(fu.ad_df$tstart2),1))
+a<-plots[[1]]+
+  labs(subtitle = subt.lbl,x="")+
+  coord_cartesian(ylim = c(0,.7))+
+  geom_rug(data=rug_df,aes(x = edvisit), sides = "b", alpha = 0.5,linewidth=0.1)+
+  theme(plot.title = element_text(hjust = .0),
+        plot.subtitle = element_text(margin=margin(t=10,b=-12)),
+        text=element_text(family="Times New Roman"))
+
+rug_df <-
+  fit.stan.fa.ms10.f9$data %>% 
+  mutate(edvisit = ifelse(edvisit == 1, tstart2, NA))
+subt.lbl<-paste0("B\n Min: ",round(min(fu.fa_df$tstart2),1),
+       ", Mean: ",round(mean(fu.fa_df$tstart2),1),
+       ", Max: ",round(max(fu.fa_df$tstart2),1))
+b<-plots[[2]]+
+  labs(subtitle = subt.lbl,x="",y="")+
+  coord_cartesian(ylim = c(0,1))+
+  geom_rug(data=rug_df,aes(x = edvisit), sides = "b", alpha = 0.5,linewidth=0.1)+
+  theme(plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(margin=margin(t=10,b=-12)),
+        text=element_text(family="Times New Roman"))
+
+rug_df <-
+  fit.stan.as.ms10.f9$data %>% 
+  mutate(edvisit = ifelse(edvisit == 1, tstart2, NA))
+subt.lbl<-paste0("C\n Min: ",round(min(fu.as_df$tstart2),1),
+       ", Mean: ",round(mean(fu.as_df$tstart2),1),
+       ", Max: ",round(max(fu.as_df$tstart2),1))
+c<-plots[[3]]+
+  labs(subtitle = subt.lbl,x="")+
+  coord_cartesian(ylim = c(0,.9))+
+  geom_rug(data=rug_df,aes(x = edvisit), sides = "b", alpha = 0.5,linewidth=0.1)+
+  theme(plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(margin=margin(t=10,b=-12)),
+        text=element_text(family="Times New Roman"))
+
+rug_df <-
+  fit.stan.ar.ms10.f9$data %>% 
+  mutate(edvisit = ifelse(edvisit == 1, tstart2, NA))
+subt.lbl<-paste0("D\n Min: ",round(min(fu.ar_df$tstart2),1),
+       ", Mean: ",round(mean(fu.ar_df$tstart2),1),
+       ", Max: ",round(max(fu.ar_df$tstart2),1))
+d<-plots[[4]]+labs(subtitle = subt.lbl,y="", x="Time (months)")+
+  coord_cartesian(ylim = c(0,1))+
+  geom_rug(data=rug_df,aes(x = edvisit), sides = "b", alpha = 0.5,linewidth=0.1)+
+  theme(plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(margin=margin(t=10,b=-12)),
+        text=element_text(family="Times New Roman"))
+
+rug_df <-
+  fit.stan.eoe.ms10.f9$data %>% 
+  mutate(edvisit = ifelse(edvisit == 1, tstart2, NA))
+subt.lbl<-paste0("E\n Min: ",round(min(fu.eoe_df$tstart2),1),
+       ", Mean: ",round(mean(fu.eoe_df$tstart2),1),
+       ", Max: ",round(max(fu.eoe_df$tstart2),1))
+e<-plots[[5]]+
+  labs(subtitle = subt.lbl, x="Time (months)")+
+  coord_cartesian(ylim = c(0,.8))+
+  geom_rug(data=rug_df,aes(x = edvisit), sides = "b", alpha = 0.5,linewidth=0.1)+
+  theme(plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(margin=margin(t=10,b=-12)),
+        text=element_text(family="Times New Roman"))
+
+design <- "
+  12
+  34
+  5#
+"
+fs1<-a+b+c+d+e+plot_layout(design = design)
+fs1
+ggsave(filename = "images/fs1_basehr_v3.png", fs1,# en cm mejor para mantener el tamanho
+  width=2200,height = 2600, dpi = 300, units = "px", device='png')
+
+```
+
+
+
+
+
+
+# Survival
+
+## Figure 1 Survival curves:AS vs AR vs FA
+
+```{r}
+RiskSetCount <- function(timeindex, patientsdf,strataoi) {
+  atrisk <- NULL
+  survivaltime<-patients$tstop2[patients$Strata==strataoi]
+  for (t in timeindex)
+    atrisk <- c(atrisk, sum(survivaltime >= t))
+  df<-data.frame(strata=strataoi,value=atrisk,time=timeindex)
+  return(df)
+}
+```
+
+Data generation process
+
+```{r}
+data_test<-data.frame(id=1:4,
+                      RACE = factor(rep(c("AA","EA"),each=2),levels=c("EA","AA")),
+                      hcType=factor("Medicaid",levels=c("Commercial","Medicaid")),
+                      age_visit=median(all_diseases$age_visit,na.rm = T),
+                      avgDailyPM=median(all_diseases$avgDailyPM,na.rm = T),
+                      ndvi=median(all_diseases$ndvi,na.rm = T),
+                      age_visit.cgm=median(all_diseases$age_visit.cgm,na.rm = T),
+                      avgDailyPM.cgm=median(all_diseases$avgDailyPM.cgm,na.rm = T),
+                      ndvi.cgm=median(all_diseases$ndvi.cgm,na.rm = T),
+                      onemore=rep(c(F,T),2),
+                      GENDER=factor(rep("Male",2),levels=c("Female","Male")),
+                      PAT_MRN_ID2=as.numeric(1)
+                      ) %>%
+  mutate(Strata = paste0(RACE, ifelse(onemore, " Comorbid", " Non-comorbid")))
+data_test
+ndraws=1000
+```
+
+
+```{r}
+annoTextS=4
+# cbPalette <- c("#E64B35","#F0E442", "#4DBBD5", "#009E73")
+cbPalette <- c("#E64B35","#d47911", "#4DBBD5", "#009E73")
+grid <- seq(0,60,by=12)
+
+
+# already collapsed
+# summary(fit.stan.ad.ms10.f9)
+ps<-posterior_survfit(fit.stan.ad.ms10.f9,  
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+# prepare HR annotations
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85),
+  label=c("HR AA=1.18 (1.06 to 1.33)",
+          "HR EA Comorbid EA=1.12 (1.02 to 1.23)")
+)
+################ survival curves
+a<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="A",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+a<-a+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "right",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+a
+#obtain legend object
+legend = get_legend(a)
+a<-a+theme(legend.position = "none")
+################ Risk table as ggplot element
+datatr <- fit.stan.ad.ms10.f9$data %>%   ungroup() %>%
+  # select(RACE,onemore) %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+
+(a<-a / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+```{r}
+mcmc_post_ci(fit.stan.fa.ms10.f9,.95,nvar = 12)%>%
+  kableExtra::kbl() %>%
+  kableExtra::kable_paper("hover",full_width=F)
+```
+
+
+
+```{r}
+# FA
+# already collapsed
+ps<-posterior_survfit(fit.stan.fa.ms10.f9,  
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+# prepare HR annotations
+text.df<-data.frame(
+  RACE="AA",
+  x=c(15),
+  y=c(0.95,0.85),
+  label=c("HR AA Comorbid=1.35 (1.21 to 1.50)",
+          "HR EA Comorbid=1.48 (1.40 to 1.58)")
+)
+################ survival curves
+b<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="B",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+b<-b+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "none",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+b
+################ Risk table as ggplot element
+datatr <- fit.stan.fa.ms10.f9$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  # scale_color_manual(values=cbPalette)+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+(b<-b / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+
+```{r}
+######AS
+# already collapsed
+ps<-posterior_survfit(fit.stan.as.ms10.f9,
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+#tidybayes does  not work with posterior_survfit yet
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85,0.75),
+  label=c("HR AA=1.16 (1.07 to 1.25)",
+          "HR AA Comorbid=1.42 (1.35 to 1.51)",
+          "HR EA Comorbid=1.56 (1.48 to 1.64)")
+)
+################ survival curves
+c<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="C",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+c<-c+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "none",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+c
+################ Risk table as ggplot element
+datatr <- fit.stan.as.ms10.f9$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+(c<-c / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+```{r}
+mcmc_post_ci(fit.stan.ar.ms10.f9,.95,12)%>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_paper("hover",full_width=F) 
+```
+
+
+```{r}
+#####AR
+# already collapsed
+ps<-posterior_survfit(fit.stan.ar.ms10.f9,
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+#tidybayes does  not work with posterior_survfit yet
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85),
+  label=c("HR AA Comorbid=1.62 (1.52 to 1.72)",
+          "HR EA Comorbid=1.55 (1.46 to 1.64)")
+)
+################ survival curves
+d<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="D",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+d<-d+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "none",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+d
+################ Risk table as ggplot element
+datatr <- fit.stan.ar.ms10.f9$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+(d<-d / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+
+```{r}
+#EoE
+# already collapsed
+ps<-posterior_survfit(fit.stan.eoe.ms10.f9,
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+#tidybayes does  not work with posterior_survfit yet
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95),
+  label=c(
+          "HR EA Comorbid=1.21 (1.03 to 1.41)")
+)
+################ survival curves
+e<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  # geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+  #             # fill = "gray90",
+  #             alpha=0.2,
+  #             size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="E",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+e<-e+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "none",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+e
+################ Risk table as ggplot element
+datatr <- fit.stan.eoe.ms10.f9$data %>%   ungroup() %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+(e<-e / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```
+
+
+
+```{r}
+f4.final<-ggpubr::ggarrange(a,b,c,d,e,legend,heights = c(1,1,1,1,1,2),
+          ncol = 2, nrow = 3)
+
+ggsave(filename = "images/figure4.surv.v13.png", f4.final,
+       # en cm mejor para mantener el tamanho
+       width=3200,height = 4800, dpi = 300, units = "px", device='png')
+```
+
+
+# TTR
+
+```{r}
+annoTextS=4
+cbPalette <- c("#E64B35","#F0E442", "#4DBBD5", "#009E73")
+grid <- seq(0,60,by=12)
+
+data_test <- data.frame(
+  id = 1:4,
+  RACE = rep(c("AA", "EA"), each = 2),
+  hcType = "Medicaid",
+  age_visit = rep(median(all_diseases$age_visit, na.rm = T), 2),
+  avgDailyPM = median(all_diseases$avgDailyPM, na.rm = T),
+  ndvi = median(all_diseases$ndvi, na.rm = T),
+  onemore = rep(c(F, T), 2),
+  GENDER = rep("Male", 2)
+) %>%
+  mutate(Strata = paste0(RACE, ifelse(onemore, " Comorbid", " Non-comorbid")))
+ndraws=500
+# already collapsed
+# summary(fit.stan.ad.ms10.f9)
+ps<-posterior_survfit(fit.stan.ad.ms10.f7,  
+                      newdata = data_test,
+                      times = 0,
+                      extrapolate   = T, 
+                      condition     = FALSE,
+                      return_matrix = F,
+                      control = list(edist = 60),
+                      draws = ndraws)
+ps<-ps %>% 
+  left_join(data_test,by="id")
+# prepare HR annotations
+text.df<-data.frame(
+  x=c(15),
+  y=c(0.95,0.85),
+  label=c("HR Comorbid AA=1.15 (1.09 to 1.21)",
+          "HR Comorbid EA=1.46 (1.37 to 1.55)")
+)
+################ survival curves
+a<-ps %>%as_tibble()%>%
+  ggplot(aes(x=time,y=median,col=Strata)) +
+  geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub,fill=Strata), 
+              # fill = "gray90",
+              alpha=0.2,
+              size=0.0) +
+  geom_line()+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values = cbPalette)+
+  scale_x_continuous(breaks = grid)+
+  labs(x="",y="Probability of Survival Free\n of ED Encounter",subtitle="A",col="Strata")+
+  survminer::theme_survminer(base_family = "Times New Roman")
+a<-a+annotate(geom="text",x=text.df$x,y=text.df$y,label=text.df$label,
+           size=annoTextS,
+           hjust=0,family="Times New Roman")+
+  theme(legend.position = "right",
+        text=element_text(family="Times New Roman"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+a
+#obtain legend object
+legend = get_legend(a)
+a<-a+theme(legend.position = "none")
+################ Risk table as ggplot element
+datatr <- fit.stan.ad.ms10.f7$data %>%   ungroup() %>%
+  # select(RACE,onemore) %>%
+  mutate(Strata = factor(
+    case_when(
+      RACE == "AA" & onemore == TRUE ~ "AA Comorbid",
+      RACE == "EA" & onemore == TRUE ~ "EA Comorbid",
+      RACE == "AA" & onemore == F ~ "AA Non-Comorbid",
+      RACE == "EA" & onemore == F ~ "EA Non-Comorbid",
+      .default = "other"
+    )
+  ))
+summary(datatr$Strata)
+patients<-datatr %>% 
+  group_by(PAT_MRN_ID) %>% 
+  arrange(tstart2) %>% 
+  slice_head()
+riskcounts.df<-rbind(RiskSetCount(grid,patients,strataoi ="AA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="AA Non-Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Comorbid"),
+          RiskSetCount(grid,patients,strataoi ="EA Non-Comorbid")
+    )
+
+tabrisk<-ggplot(riskcounts.df, aes(x = time,y = factor(strata),
+  label = as.character(value)
+  ))  +
+  geom_text(size = 4,family = "Times New Roman")+
+  coord_cartesian(xlim = c(0,60))+
+  scale_x_continuous(breaks=grid)+
+  scale_y_discrete(limits=rev(c(
+    "AA Comorbid",
+    "AA Non-Comorbid",
+    "EA Comorbid",
+    "EA Non-Comorbid"
+  )),labels=c("","","",""))+
+  labs(x="Time (months)",y="Strata",subtitle = "Number at risk")+
+  survminer::theme_survminer(base_family = "Times New Roman")+
+  theme(legend.position = "none",
+        text = element_text(family = "Times New Roman"),
+        axis.text.y = element_text( hjust = 1 ),
+        axis.ticks.y = element_line(size  = 2,colour = rev(cbPalette)),
+        axis.ticks.length.y = unit(15, "pt"),
+        plot.margin = unit(c(0,0,0,0), "cm"))
+
+(a<-a / tabrisk+plot_layout(ncol=1,heights = c(3,1)))
+```

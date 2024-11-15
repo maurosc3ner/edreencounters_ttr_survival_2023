@@ -1,0 +1,1169 @@
+---
+title: "01_AM_preprocessing_v1"
+author: "Esteban Correa"
+date: "12/3/2021"
+output: html_document
+---
+
+v1b
+Age*gender interaction added
+
+-v2
+long DF to wide DF, dates for first diagnose of each 5 diseases. Heuristic logic for basic atopic trajectories.
+
+v4
+interval type dataset for AS,AR,AD,FA
+
+v5
+include addresses per visit, and greenspace
+
+v6
+filepath changes to work properly with degauss outputs.
+EoE has been added as 5th disease
+
+v7
+public insurance added to the dataset
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+memory.size()
+rm(list = ls())
+memory.limit(size=64000)
+gc()
+library(tidyverse)
+library(foreign)
+library(lubridate)
+library(gtsummary)
+library(survminer)
+library(survival)
+
+# diag <- read.table("../../EHR-CCHMC 2009-2020/1426_Visit_diagnosis.txt",sep="|",header = T,colClasses ="character")
+# diag$PAT_MRN_ID<-sprintf("%010d", as.numeric(diag$PAT_MRN_ID))
+# #
+# patients<-read.delim("../../EHR-CCHMC 2009-2020/1426_Demo.txt",header = T,sep = "|")
+# patients$PATIENT_MRN<-sprintf("%010d", as.numeric(patients$PATIENT_MRN))
+# colnames(patients)[1]<-"PAT_MRN_ID"
+# 
+# addresses<-read.delim("../../EHR-CCHMC 2009-2020/1426_Address_list.txt",header = T,sep = "|")
+# addresses$PAT_MRN_ID<-sprintf("%010d", as.numeric(addresses$PAT_MRN_ID))
+# addresses<-addresses %>% 
+#   filter(STATE_HX %in% c("Kentucky","Ohio")) %>% 
+#   mutate(VISIT_DATE_adr=mdy(VISIT_DATE),
+#          id_date=paste0(PAT_MRN_ID,"-",VISIT_DATE_adr)) %>% 
+#   distinct(id_date,.keep_all = T) %>% 
+#   mutate(fullAddress=paste(ADDR_HX_LINE1,CITY_HX,STATE_HX,ZIP_HX))%>% 
+#   dplyr::select(id_date,VISIT_DATE_adr,fullAddress)
+
+
+# save.image("files.RData")
+load("data/files.RData")
+```
+
+
+
+
+J30 Vasomotor and allergic rhinitis
+
+J45 Asthma
+
+K20.0 Eosinophilic esophagitis
+
+L20 Atopic dermatitis
+
+Z68.54 greater than or equal to 95th percentile for age
+
+Z77.22 Contact with and (suspected) exposure to environmental tobacco smoke (acute) (chronic)
+
+<!-- Z81.2 Family history of tobacco abuse and dependence -->
+
+Z82.5 family history of asthma and other chronic lower respiratory diseases
+
+Z84.0 Family history of subcutaneous diseases
+
+Z84.89 Family history of allergy
+
+Z91.01 Food allergy status
+
+```{r}
+diseases<-'J30|J45|K20.0|L20|Z91.01'
+
+diag2<-diag%>%
+  dplyr::filter(grepl(diseases,
+                      CURRENT_ICD10_LIST,
+                      ignore.case = T) & !grepl('O99|J20|J44',
+                      CURRENT_ICD10_LIST,
+                      ignore.case = T)) %>%
+
+  mutate(VISIT_DATE2=lubridate::mdy(VISIT_DATE),
+         myICD=str_extract(CURRENT_ICD10_LIST,
+                             regex("[A-Z][0-9]+\\.[0-9]",
+                                   ignore_case = TRUE))) %>% 
+  mutate(myICD=ifelse(myICD=='Z84.0',"Z99.0",myICD)) %>% 
+  # mutate(myICD=as.factor(recode(myICD,`Z84.0` = "Z99.0"))) %>% 
+  mutate(myICD=str_extract(myICD,
+                             regex("[A-Z][0-9]+",
+                                   ignore_case = TRUE))) %>% 
+  mutate(myICD=as.factor(recode(myICD,`E66` = "Z68",`H10`="J30")))
+  
+
+summary(as.factor(diag2$myICD))
+
+
+comorbidities_list<-'Z68.54|Z77.22|Z82.5|Z84.0|Z84.89'
+
+comorb1<-diag%>%
+  dplyr::filter(grepl(comorbidities_list,
+                      CURRENT_ICD10_LIST,
+                      ignore.case = T) & !grepl('O99|J20|J44',
+                      CURRENT_ICD10_LIST,
+                      ignore.case = T)) %>%
+
+  mutate(VISIT_DATE2=lubridate::mdy(VISIT_DATE),
+         myICD=str_extract(CURRENT_ICD10_LIST,
+                             regex("[A-Z][0-9]+\\.[0-9]",
+                                   ignore_case = TRUE))) %>% 
+  mutate(myICD=ifelse(myICD=='Z84.0',"Z99.0",myICD)) %>% 
+  # mutate(myICD=as.factor(recode(myICD,`Z84.0` = "Z99.0"))) %>% 
+  mutate(myICD=str_extract(myICD,
+                             regex("[A-Z][0-9]+",
+                                   ignore_case = TRUE))) %>% 
+  mutate(myICD=as.factor(recode(myICD,`E66` = "Z68",`H10`="J30")))
+  
+
+summary(as.factor(comorb1$myICD))
+
+
+mindate=ymd('20150101')
+maxdate=ymd('20191231') # we should not include covid year
+(x=interval((mindate),(maxdate)))
+# (x_m= x %/% months(1))
+(x_m= 120)
+x_days=4383
+
+```
+
+## Limit those visits until 21yo
+
+```{r}
+patients2<-patients %>% 
+  dplyr::select(PAT_MRN_ID,BIRTH_DATE,GENDER,PATIENT_RACE,ETHNICITY,CURRENT_ADDRESS,CURRENT_CITY,CURRENT_STATE,CURRENT_ZIP) %>% 
+  filter(PATIENT_RACE %in% c("WHITE","BLACK OR AFRICAN AMERICAN")) %>% 
+  filter(CURRENT_STATE %in% c("Ohio","Kentucky"))
+summary(as.factor(patients2$PATIENT_RACE))
+
+diag3<-diag2 %>% 
+  left_join(patients2,by="PAT_MRN_ID") %>% 
+  drop_na(BIRTH_DATE)
+
+diag3$BIRTH_DATE2<-mdy(diag3$BIRTH_DATE)
+# summary(diag3)
+
+diag4<-diag3 %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>% 
+  drop_na(BIRTH_DATE2)
+
+# summary(diag4)
+
+diag4$age_visit=round((unclass(diag4$VISIT_DATE2)-unclass(diag4$BIRTH_DATE2)) / 365.25,1)
+
+diag5<-diag4 %>% 
+  filter(age_visit>=0 & age_visit<21)
+summary(diag5)
+```
+
+Filter those similar diagnosis that occurred in less than 7 days:
+
+```{r}
+# estimate date difference in days
+diag6<-diag5%>%
+  select(PAT_MRN_ID,VISIT_DATE2,myICD,GENDER,PATIENT_RACE,age_visit,BIRTH_DATE2) %>% 
+  dplyr::group_by(PAT_MRN_ID,myICD)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2,myICD) %>% 
+  mutate(date_diff2 = as.numeric(VISIT_DATE2)-lag(as.numeric(VISIT_DATE2)))
+  # head(.,1000)  # QUICK TEST FOR FIRST TEN ROWS
+  
+# manual test of dates
+# as.numeric(ymd("2015-10-21"))-as.numeric(ymd("2015-07-17"))
+# as.numeric(ymd("2015-10-23"))-as.numeric(ymd("2015-07-17"))
+
+# Filter those first and >7 days similar diagnosis
+diag7<-diag6 %>% 
+  filter(is.na(date_diff2) | date_diff2>7)   %>% 
+  filter(VISIT_DATE2>=mindate & VISIT_DATE2<=maxdate)
+
+# all patients previously diagnosed to mindate
+prevdiag7<-diag6 %>% 
+  filter(is.na(date_diff2) | date_diff2>7)   %>% 
+  filter(VISIT_DATE2<mindate) %>% 
+  select(PAT_MRN_ID) %>% 
+  ungroup() %>% 
+  distinct(PAT_MRN_ID)
+
+#exclude from diag7 all patients previously diagnosed to mindate
+diag8<-diag7 %>% 
+  dplyr::filter(!(PAT_MRN_ID %in% prevdiag7$PAT_MRN_ID))
+
+
+
+
+
+
+
+diag7$interval=round(time_length(interval(mindate,diag7$VISIT_DATE2),"months"),2)# join dates information
+diag7$id_date<-paste0(diag7$PAT_MRN_ID,"-",diag7$VISIT_DATE2)
+
+
+```
+
+
+```{r}
+
+comorb1<-diag7 %>% 
+  # dplyr::filter(myICD!="J45") %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         # prevEoE=if_else(myICD=="K20",1,0),
+         # EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="J45" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA)
+
+
+```
+
+
+# Degauss
+
+## Degauss: geocode
+
+This part creates the pipelines for geocoding, deprivation, proximity to roads, greenspace and daily PM.
+
+```{r}
+degauss<-addresses %>% 
+  ungroup() %>% 
+  filter(VISIT_DATE_adr>=mindate & VISIT_DATE_adr<=maxdate) %>% 
+  mutate(start_date=VISIT_DATE_adr-6) %>% 
+  rename(
+         end_date=VISIT_DATE_adr,
+         address=fullAddress) %>% 
+  dplyr::select(id_date,address,start_date,end_date) %>% 
+  distinct(id_date,address,.keep_all = T)
+
+
+degauss2<-degauss %>% 
+  right_join(diag7 %>% select(id_date) ,by ="id_date") %>% 
+  drop_na(address)
+
+# %>% 
+#   dplyr::select(id_date,address,start_date,end_date) 
+sum(is.na(degauss2$address))
+## address to geocode 
+#split
+# str(split(degauss, (seq(nrow(degauss))-1) %/% 500) )
+files<-(split(degauss2, (seq(nrow(degauss2))-1) %/%150000) )
+files
+i<-0
+for (idx in files){
+  idx$start_date<-as.character(idx$start_date)
+  idx$end_date<-as.character(idx$end_date)
+  write.csv(idx,file = paste0("data/degauss/atmv5_",i,"_base.csv"),row.names = F)
+  i<-i+1
+}
+```
+
+```{}
+# please open the terminal, go to the folder (no spaces) and type:
+# docker run --rm -v $PWD:/tmp ghcr.io/degauss-org/geocoder:3.2.1 atmv5_2_base.csv 
+```
+
+bind all separated geocoded files
+
+```{r}
+# find out all geocoded files
+geocoded_files<-list.files(path = "data/degauss/", full.names = FALSE,
+                     pattern = "geocoder_3.2.1")
+geocoded_files
+#combine them
+degauss3<-{}
+for (currentFilename in geocoded_files){
+  temp<-read.csv(paste0("data/degauss/",currentFilename))
+  degauss3<-rbind(degauss3,temp)
+  # print(currentFilename)
+}
+
+# filter those correctly geocoded
+degauss4<-degauss3 %>% 
+  drop_na(lat) %>% 
+  dplyr::select(id_date,start_date,end_date,lat,lon)
+```
+
+# Degauss: deprivation
+
+```{r}
+# str(split(degauss, (seq(nrow(degauss))-1) %/% 500) )
+files<-(split(degauss4, (seq(nrow(degauss4))-1) %/%150000) )
+i<-0
+for (idx in files){
+  idx$start_date<-as.character(idx$start_date)
+  idx$end_date<-as.character(idx$end_date)
+  write.csv(idx,file = paste0("data/degauss/atmv5_",i,"_geocoded.csv"),row.names = F)
+  i<-i+1
+}
+```
+
+
+```{}
+# please open the terminal, go to the folder (no spaces) and type:
+docker run --rm -v $PWD:/tmp ghcr.io/degauss-org/dep_index:0.2.1 atmv5_5_geocoded.csv 
+```
+
+bind all separated dep_index files
+
+```{r}
+# find out all geocoded files
+depidx_files<-list.files(path = "data/degauss/", full.names = FALSE,
+                     pattern = "dep_index")
+depidx_files
+#combine them
+degauss5<-{}
+for (currentFilename in depidx_files){
+  temp<-read.csv(paste0("data/degauss/",currentFilename))
+  degauss5<-rbind(degauss5,temp)
+}
+
+# Filter by
+# Butler, Warren, Hamilton, Clermont,
+# Boone, kenton, Campbell
+coi.list<-c("39017","39165","39061","39025",
+            "21015","21117","21037")
+degauss6<-degauss5 %>% 
+  select(id_date,start_date,end_date,census_tract_id,dep_index,lat,lon) %>% 
+  dplyr::mutate(county_id=as.factor(substr(census_tract_id, 1, 5))) %>% 
+  dplyr::filter(county_id %in% coi.list) %>% 
+  distinct(id_date,.keep_all=T)       # to avoid same ID and date 
+# filter those correctly geocoded
+
+
+```
+
+# degauss: Greenspace
+
+```{r}
+degauss7<-degauss6 %>% 
+  select(id_date,lat,lon)
+
+write.csv(degauss7,file = paste0("data/degauss/atmv5_all_dep_index.csv"),row.names = F)
+
+
+# find out all greenspace files
+greenspace_files<-list.files(path = "data/degauss/", full.names = FALSE,
+                     pattern = "greenspace_0.3.0.csv")
+greenspace_files
+#combine them
+degauss_ndvi<-{}
+for (currentFilename in greenspace_files){
+  temp<-read.csv(paste0("data/degauss/",currentFilename))
+  degauss_ndvi<-rbind(degauss_ndvi,temp)
+}
+
+degauss_ndvi<-degauss_ndvi %>% 
+  mutate(ndvi=rowMeans(select(., evi_500:evi_2500),na.rm = T)) %>% 
+  select(id_date,ndvi)
+
+
+```
+
+```{}
+# please open the terminal, go to the folder (no spaces) and type:
+docker run --rm -v $PWD:/tmp ghcr.io/degauss-org/greenspace:0.3.0 atmv5_all_dep_index.csv
+```
+
+
+# degauss: PM
+
+```{r}
+#write files
+# str(split(degauss, (seq(nrow(degauss))-1) %/% 500) )
+files<-(split(degauss6, (seq(nrow(degauss6))-1) %/%140000) )
+i<-0
+for (idx in files){
+  idx$start_date<-as.character(idx$start_date)
+  idx$end_date<-as.character(idx$end_date)
+  write.csv(idx,file = paste0("data/degauss/atmv5_",i,"_dep_idx.csv"),row.names = F)
+  i<-i+1
+}
+
+```
+
+```{}
+# please open the terminal, go to the folder (no spaces) and type:
+docker run --rm -v $PWD:/tmp ghcr.io/degauss-org/pm:0.2.0 atmv5_0_dep_idx.csv
+```
+
+Then we take splitted pm files and join into one full averaged pm file:
+
+```{r}
+
+pm_files<-list.files(path = "data/degauss/", full.names = FALSE,
+                     pattern = "pm_0.2.0.csv")
+pm_files
+
+degauss_pm<-{}
+for (currentFilename in pm_files){
+  
+  temp<-read.csv(paste0("data/degauss/",currentFilename))
+  degauss_pm<-rbind(degauss_pm,temp)
+  # print(currentFilename)
+}
+
+# average daily measures of PM by PAT_MRN_ID and date
+degauss_pm2<-degauss_pm%>%
+    dplyr::group_by(id_date)%>%
+    dplyr::summarize(nsamplesPM=n(),
+                     year=first(year),
+                     avgDailyPM=mean(pm_pred,na.rm = T))
+
+
+hist(degauss_pm2$avgDailyPM,64)
+```
+
+Create exposures data frame
+
+```{r}
+exposures<-degauss6 %>% 
+  inner_join(degauss_ndvi,by="id_date") %>% 
+  inner_join(degauss_pm2,by="id_date")
+
+# write.csv(exposures,file = paste0("data/exposures_v1.csv"),row.names = F)
+
+exposures<-read.csv("data/exposures_v1.csv")
+```
+
+#AD
+
+```{r}
+diag8 <- diag7 %>%
+  dplyr::filter(myICD == "L20") %>%
+  dplyr::group_by(PAT_MRN_ID, myICD) %>%
+  arrange(PAT_MRN_ID, myICD, VISIT_DATE2) %>%
+  mutate(futime = 60, visitNum = paste0("visit", sprintf("%03d", row_number())))
+diag8_wide <-
+  spread(diag8 %>% select(PAT_MRN_ID, interval, visitNum),
+         visitNum,
+         interval) 
+
+diag8_wide$futime=60
+visits<-diag8_wide %>% select(starts_with("visit"))
+(visits<-names(visits[,-c(1,2)]))
+
+diag9_wide<-tmerge(diag8_wide %>% select(-starts_with("visit")), diag8_wide, id=PAT_MRN_ID, tstop=futime)
+
+for(name in visits){
+  # print(name)
+  diag9_wide <- tmerge(diag9_wide, diag8_wide, id=PAT_MRN_ID, edvisit = event(get(name))
+                     )
+}
+#55632724
+diag9_wide <- tmerge(diag9_wide, diag9_wide, id=PAT_MRN_ID, enum=cumtdc(tstart))
+diag9_wide$id_interval=paste0(diag9_wide$PAT_MRN_ID,"_",sprintf("%.2f", diag9_wide$tstop))
+```
+
+Joining
+
+```{r}
+# join comorbidities
+comorb1<-diag7 %>% 
+  # dplyr::filter(myICD!="J45") %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         prevEoE=if_else(myICD=="K20",1,0),
+         EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="L20" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA,EoE)
+
+diag10_wide<-diag9_wide %>% 
+  left_join(comorb1,by="id_interval")
+
+# Join VISIT_DATE2 by id_interval
+diag8_visitdate<-diag8 %>% 
+  ungroup() %>% 
+  select(PAT_MRN_ID,interval,VISIT_DATE2,id_date) %>% 
+  mutate(id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))) %>% 
+  select(VISIT_DATE2,id_interval,id_date)
+
+diag11_wide<-diag10_wide %>% 
+  left_join(diag8_visitdate,by="id_interval") 
+
+
+#Join of exposures
+diag12_wide<-diag11_wide %>% 
+  left_join(exposures,by="id_date") 
+
+# NA filling
+diag13_wide <- diag12_wide %>%
+  dplyr::group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID, tstart) %>%
+  mutate(
+    BIRTH_DATE2 = if_else(is.na(BIRTH_DATE2), lag(BIRTH_DATE2), BIRTH_DATE2),
+    VISIT_DATE2 = if_else(is.na(VISIT_DATE2), maxdate, VISIT_DATE2),
+    RACE = if_else(is.na(PATIENT_RACE), lag(PATIENT_RACE), PATIENT_RACE),
+    GENDER = if_else(is.na(GENDER), lag(GENDER), GENDER),
+    AD = if_else(is.na(AD), lag(AD), AD),
+    AS = if_else(is.na(AS), lag(AS), AS),
+    AR = if_else(is.na(AR), lag(AR), AR),
+    FA = if_else(is.na(FA), lag(FA), FA),
+    EoE = if_else(is.na(EoE), lag(EoE), EoE),
+    age_visit=if_else(is.na(age_visit),round((unclass(maxdate)-unclass(BIRTH_DATE2)) / 365.25,1),age_visit),
+    lat=if_else(is.na(lat), lag(lat), lat) # used as a flag for deletion
+  ) %>%  
+  mutate(RACE=as.factor(recode(RACE, 
+                         `WHITE`="EA",
+                         `BLACK OR AFRICAN AMERICAN`="AA"))) 
+
+# test with this case 0000637772
+
+ad_wide<-diag13_wide%>% 
+  select(PAT_MRN_ID,VISIT_DATE2,id_date,id_interval,tstart,tstop,edvisit,futime,enum,age_visit,GENDER,RACE,AD,AS,AR,FA,EoE,
+         lat,lon,census_tract_id,county_id,avgDailyPM,dep_index,ndvi) %>% 
+  mutate(year=year(VISIT_DATE2)) %>% 
+  filter(!is.na(lat) )
+# write.csv(ad_wide,file = paste0("data/ad_wide_v1.csv"),row.names = F)
+```
+
+
+
+# Asthma
+
+```{r}
+# asthma
+diag8<-diag7 %>% 
+  dplyr::filter(myICD=="J45") %>% 
+  dplyr::group_by(PAT_MRN_ID,myICD)%>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>% 
+  mutate(futime=60,visitNum=paste0("visit",sprintf("%03d", row_number())))
+  
+
+diag8_wide <- spread(diag8%>% select(PAT_MRN_ID,interval,visitNum), visitNum, interval) 
+
+diag8_wide$futime=60
+visits<-diag8_wide %>% select(starts_with("visit"))
+(visits<-names(visits[,-c(1,2)]))
+
+diag9_wide<-tmerge(diag8_wide %>% select(-starts_with("visit")), diag8_wide, id=PAT_MRN_ID, tstop=futime)
+
+for(name in visits){
+  # print(name)
+  diag9_wide <- tmerge(diag9_wide, diag8_wide, id=PAT_MRN_ID, edvisit = event(get(name))
+                     )
+}
+#55632724
+diag9_wide <- tmerge(diag9_wide, diag9_wide, id=PAT_MRN_ID, enum=cumtdc(tstart))
+diag9_wide$id_interval=paste0(diag9_wide$PAT_MRN_ID,"_",sprintf("%.2f", diag9_wide$tstop))
+```
+
+Joining
+
+```{r}
+# join comorbidities
+comorb1<-diag7 %>% 
+  # dplyr::filter(myICD!="J45") %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         prevEoE=if_else(myICD=="K20",1,0),
+         EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="J45" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA,EoE)
+
+diag10_wide<-diag9_wide %>% 
+  left_join(comorb1,by="id_interval")
+
+# Join VISIT_DATE2 by id_interval
+diag8_visitdate<-diag8 %>% 
+  select(PAT_MRN_ID,interval,VISIT_DATE2,id_date) %>% 
+  mutate(id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval)))
+
+diag11_wide<-diag10_wide %>% 
+  left_join(diag8_visitdate,by="id_interval") %>% 
+  select(-c(PAT_MRN_ID.y,interval.y,myICD.y)) %>% 
+  rename(
+         myICD=myICD.x,
+         PAT_MRN_ID=PAT_MRN_ID.x,
+         interval=interval.x) 
+
+#Join of exposures
+diag12_wide<-diag11_wide %>% 
+  left_join(exposures,by="id_date") 
+
+# NA filling
+diag13_wide <- diag12_wide %>%
+  dplyr::group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID, tstart) %>%
+  mutate(
+    BIRTH_DATE2 = if_else(is.na(BIRTH_DATE2), lag(BIRTH_DATE2), BIRTH_DATE2),
+    VISIT_DATE2 = if_else(is.na(VISIT_DATE2), maxdate, VISIT_DATE2),
+    RACE = if_else(is.na(PATIENT_RACE), lag(PATIENT_RACE), PATIENT_RACE),
+    GENDER = if_else(is.na(GENDER), lag(GENDER), GENDER),
+    AD = if_else(is.na(AD), lag(AD), AD),
+    AS = if_else(is.na(AS), lag(AS), AS),
+    AR = if_else(is.na(AR), lag(AR), AR),
+    FA = if_else(is.na(FA), lag(FA), FA),
+    EoE = if_else(is.na(EoE), lag(EoE), EoE),
+    age_visit=if_else(is.na(age_visit),round((unclass(maxdate)-unclass(BIRTH_DATE2)) / 365.25,1),age_visit),
+    lat=if_else(is.na(lat), lag(lat), lat) # used as a flag for deletion
+  ) %>%  
+  mutate(RACE=as.factor(recode(RACE, 
+                         `WHITE`="EA",
+                         `BLACK OR AFRICAN AMERICAN`="AA"))) 
+
+# test with this case 0000637772
+
+as_wide<-diag13_wide%>% 
+  select(PAT_MRN_ID,VISIT_DATE2,id_date,id_interval,tstart,tstop,edvisit,futime,enum,age_visit,GENDER,RACE,AD,AS,AR,FA,EoE,
+         lat,lon,census_tract_id,county_id,avgDailyPM,dep_index,ndvi) %>% 
+  mutate(year=year(VISIT_DATE2)) %>% 
+  filter(!is.na(lat) )
+
+# write.csv(as_wide,file = paste0("data/as_wide_v1.csv"),row.names = F)
+```
+
+# EoE
+
+```{r}
+# asthma
+diag8<-diag7 %>% 
+  dplyr::filter(myICD=="K20") %>% 
+  dplyr::group_by(PAT_MRN_ID,myICD)%>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>% 
+  mutate(futime=60,visitNum=paste0("visit",sprintf("%03d", row_number())))
+  
+
+diag8_wide <- spread(diag8%>% select(PAT_MRN_ID,interval,visitNum), visitNum, interval) 
+
+diag8_wide$futime=60
+visits<-diag8_wide %>% select(starts_with("visit"))
+(visits<-names(visits[,-c(1,2)]))
+
+diag9_wide<-tmerge(diag8_wide %>% select(-starts_with("visit")), diag8_wide, id=PAT_MRN_ID, tstop=futime)
+
+for(name in visits){
+  # print(name)
+  diag9_wide <- tmerge(diag9_wide, diag8_wide, id=PAT_MRN_ID, edvisit = event(get(name))
+                     )
+}
+#55632724
+diag9_wide <- tmerge(diag9_wide, diag9_wide, id=PAT_MRN_ID, enum=cumtdc(tstart))
+diag9_wide$id_interval=paste0(diag9_wide$PAT_MRN_ID,"_",sprintf("%.2f", diag9_wide$tstop))
+```
+
+Joining all to EoE
+
+```{r}
+# join comorbidities
+comorb1<-diag7 %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         prevEoE=if_else(myICD=="K20",1,0),
+         EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="K20" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA,EoE)
+
+diag10_wide<-diag9_wide %>% 
+  left_join(comorb1,by="id_interval")
+
+# Join VISIT_DATE2 by id_interval
+diag8_visitdate<-diag8 %>% 
+  select(PAT_MRN_ID,interval,VISIT_DATE2,id_date) %>% 
+  mutate(id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval)))
+
+diag11_wide<-diag10_wide %>% 
+  left_join(diag8_visitdate,by="id_interval") %>% 
+  select(-c(PAT_MRN_ID.y,interval.y,myICD.y)) %>% 
+  rename(
+         myICD=myICD.x,
+         PAT_MRN_ID=PAT_MRN_ID.x,
+         interval=interval.x) 
+
+#Join of exposures
+diag12_wide<-diag11_wide %>% 
+  left_join(exposures,by="id_date") 
+
+# NA filling
+diag13_wide <- diag12_wide %>%
+  dplyr::group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID, tstart) %>%
+  mutate(
+    BIRTH_DATE2 = if_else(is.na(BIRTH_DATE2), lag(BIRTH_DATE2), BIRTH_DATE2),
+    VISIT_DATE2 = if_else(is.na(VISIT_DATE2), maxdate, VISIT_DATE2),
+    RACE = if_else(is.na(PATIENT_RACE), lag(PATIENT_RACE), PATIENT_RACE),
+    GENDER = if_else(is.na(GENDER), lag(GENDER), GENDER),
+    AD = if_else(is.na(AD), lag(AD), AD),
+    AS = if_else(is.na(AS), lag(AS), AS),
+    AR = if_else(is.na(AR), lag(AR), AR),
+    FA = if_else(is.na(FA), lag(FA), FA),
+    EoE = if_else(is.na(EoE), lag(EoE), EoE),
+    age_visit=if_else(is.na(age_visit),round((unclass(maxdate)-unclass(BIRTH_DATE2)) / 365.25,1),age_visit),
+    lat=if_else(is.na(lat), lag(lat), lat) # used as a flag for deletion
+  ) %>%  
+  mutate(RACE=as.factor(recode(RACE, 
+                         `WHITE`="EA",
+                         `BLACK OR AFRICAN AMERICAN`="AA"))) 
+
+# test with this case 0000637772
+
+eoe_wide<-diag13_wide%>% 
+  select(PAT_MRN_ID,VISIT_DATE2,id_date,id_interval,tstart,tstop,edvisit,futime,enum,age_visit,GENDER,RACE,AD,AS,AR,FA,EoE,
+         lat,lon,census_tract_id,county_id,avgDailyPM,dep_index,ndvi) %>% 
+  mutate(year=year(VISIT_DATE2)) %>% 
+  filter(!is.na(lat) )
+
+# write.csv(eoe_wide,file = paste0("data/as_wide_v1.csv"),row.names = F)
+```
+
+
+```{r}
+library(tableone)
+# (table(diag12$visit_1,diag12$RACE))
+diag12_AS<-as_wide
+diag12_AS<-droplevels(diag12_AS)
+
+
+myVars<-c("dep_index","avgDailyPM")
+tab <- CreateTableOne(vars = myVars, 
+                      # strata = "RACE" ,
+                      data = diag12_AS,
+                       includeNA = T,
+                          test = T)
+# tab2Mat<-print(tab, showAllLevels = TRUE, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+# tab2Mat
+kableone(tab,nonnormal=T)
+tab <- CreateTableOne(vars = myVars,
+                      strata = "RACE" ,
+                      data = diag12_AS,
+                       includeNA = T,
+                          test = T)
+# tab2Mat<-print(tab showAllLevels = T, formatOptions = list(big.mark = ","),quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+# tab2Mat
+kableone(tab,nonnormal=T)
+```
+
+
+## Depidx at visit
+
+```{r}
+var="dep_index"
+
+ggplot()+
+  geom_point(data=as_wide,aes(x=year,y=get(var),col=RACE),position = "jitter",alpha=0.05,size=0.1)+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean,
+               geom="line",size=1,position=position_dodge(0.2))+
+  scale_x_continuous(breaks = c(2015,2016,2017,2018,2019))+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean, geom="point",
+               size=1.5,position=position_dodge(0.2))+
+  labs(subtitle = "",x="",y=var,color="Race")+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "bottom")
+```
+
+## ndvi at visit
+
+```{r}
+var="ndvi"
+
+ggplot()+
+  geom_point(data=as_wide,aes(x=year,y=get(var),col=RACE),position = "jitter",alpha=0.05,size=0.1)+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean,
+               geom="line",size=1,position=position_dodge(0.2))+
+  scale_x_continuous(breaks = c(2015,2016,2017,2018,2019))+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean, geom="point",
+               size=1.5,position=position_dodge(0.2))+
+  labs(subtitle = "",x="",y=var,color="Race")+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "bottom")
+
+```
+
+
+## PM at visit
+
+```{r}
+var="avgDailyPM"
+
+ggplot()+
+  geom_point(data=as_wide,aes(x=year,y=get(var),col=RACE),position = "jitter",alpha=0.05,size=0.1)+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean,
+               geom="line",size=1,position=position_dodge(0.2))+
+  scale_x_continuous(breaks = c(2015,2016,2017,2018,2019))+
+  stat_summary(data=as_wide,aes(x=year,y=get(var),col=RACE), fun.y=mean, geom="point",
+               size=1.5,position=position_dodge(0.2))+
+  labs(subtitle = "",x="",y=var,color="Race")+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "bottom")
+
+```
+
+```{r}
+library(survival)
+
+
+
+data<-as_wide %>% 
+  # dplyr::filter(myICD=="J45") %>% 
+  mutate(RACE=factor(recode(RACE,`WHITE`="EA",`BLACK OR AFRICAN AMERICAN`="AA"),levels=c("EA","AA"))
+         ) %>% drop_na(age_visit)
+summary(data)
+
+data %>% 
+  distinct(PAT_MRN_ID,.keep_all = T) %>% 
+  group_by(RACE) %>% 
+  summarise(freq=n())
+
+f1=formula(Surv(tstart, tstop, edvisit) ~ RACE+AD+FA+AR+age_visit*GENDER)
+cox.as<-coxph(formula = f1,data =data)
+summary(cox.as)
+
+f1=formula(Surv(tstart, tstop, edvisit) ~ RACE+AD+age_visit*GENDER+dep_index+avgDailyPM+ndvi)
+cox.as<-coxph(formula = f1,data =data)
+
+summary(cox.as)
+
+```
+
+# Allergic rhinitis
+
+```{r}
+# AR
+diag8<-diag7 %>% 
+  dplyr::filter(myICD=="J30") %>% 
+  dplyr::group_by(PAT_MRN_ID,myICD)%>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>% 
+  mutate(futime=60,visitNum=paste0("visit",sprintf("%03d", row_number())))
+  
+
+diag8_wide <- spread(diag8%>% select(PAT_MRN_ID,interval,visitNum), visitNum, interval) 
+
+diag8_wide$futime=60
+visits<-diag8_wide %>% select(starts_with("visit"))
+(visits<-names(visits[,-c(1,2)]))
+
+diag9_wide<-tmerge(diag8_wide %>% select(-starts_with("visit")), diag8_wide, id=PAT_MRN_ID, tstop=futime)
+
+for(name in visits){
+  # print(name)
+  diag9_wide <- tmerge(diag9_wide, diag8_wide, id=PAT_MRN_ID, edvisit = event(get(name))
+                     )
+}
+#55632724
+diag9_wide <- tmerge(diag9_wide, diag9_wide, id=PAT_MRN_ID, enum=cumtdc(tstart))
+diag9_wide$id_interval=paste0(diag9_wide$PAT_MRN_ID,"_",sprintf("%.2f", diag9_wide$tstop))
+```
+
+Joining
+
+```{r}
+# join comorbidities
+comorb1<-diag7 %>% 
+  # dplyr::filter(myICD!="J45") %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         prevEoE=if_else(myICD=="K20",1,0),
+         EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="J30" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA,EoE)
+
+diag10_wide<-diag9_wide %>% 
+  left_join(comorb1,by="id_interval")
+
+# Join VISIT_DATE2 by id_interval
+diag8_visitdate<-diag8 %>% 
+  select(PAT_MRN_ID,interval,VISIT_DATE2,id_date) %>% 
+  mutate(id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval)))
+
+diag11_wide<-diag10_wide %>% 
+  left_join(diag8_visitdate,by="id_interval") %>% 
+  select(-c(PAT_MRN_ID.y,interval.y,myICD.y)) %>% 
+  rename(
+         myICD=myICD.x,
+         PAT_MRN_ID=PAT_MRN_ID.x,
+         interval=interval.x) 
+
+#Join of exposures
+diag12_wide<-diag11_wide %>% 
+  left_join(exposures,by="id_date") 
+
+# NA filling
+diag13_wide <- diag12_wide %>%
+  dplyr::group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID, tstart) %>%
+  mutate(
+    BIRTH_DATE2 = if_else(is.na(BIRTH_DATE2), lag(BIRTH_DATE2), BIRTH_DATE2),
+    VISIT_DATE2 = if_else(is.na(VISIT_DATE2), maxdate, VISIT_DATE2),
+    RACE = if_else(is.na(PATIENT_RACE), lag(PATIENT_RACE), PATIENT_RACE),
+    GENDER = if_else(is.na(GENDER), lag(GENDER), GENDER),
+    AD = if_else(is.na(AD), lag(AD), AD),
+    AS = if_else(is.na(AS), lag(AS), AS),
+    AR = if_else(is.na(AR), lag(AR), AR),
+    FA = if_else(is.na(FA), lag(FA), FA),
+    EoE = if_else(is.na(EoE), lag(EoE), EoE),
+    age_visit=if_else(is.na(age_visit),round((unclass(maxdate)-unclass(BIRTH_DATE2)) / 365.25,1),age_visit),
+    lat=if_else(is.na(lat), lag(lat), lat) # used as a flag for deletion
+  ) %>%  
+  mutate(RACE=as.factor(recode(RACE, 
+                         `WHITE`="EA",
+                         `BLACK OR AFRICAN AMERICAN`="AA"))) 
+
+# test with this case 0000637772
+
+ar_wide<-diag13_wide%>% 
+  select(PAT_MRN_ID,VISIT_DATE2,id_date,id_interval,tstart,tstop,edvisit,futime,enum,age_visit,GENDER,RACE,AD,AS,AR,FA,EoE,
+         lat,lon,census_tract_id,county_id,avgDailyPM,dep_index,ndvi) %>% 
+  mutate(year=year(VISIT_DATE2)) %>% 
+  filter(!is.na(lat) )
+
+```
+
+
+# FA
+
+```{r}
+# FA
+diag8<-diag7 %>% 
+  dplyr::filter(myICD=="Z91") %>% 
+  dplyr::group_by(PAT_MRN_ID,myICD)%>%
+  arrange(PAT_MRN_ID,myICD,VISIT_DATE2) %>% 
+  mutate(futime=60,visitNum=paste0("visit",sprintf("%03d", row_number())))
+  
+diag8_wide <- spread(diag8%>% select(PAT_MRN_ID,interval,visitNum), visitNum, interval) 
+
+diag8_wide$futime=60
+visits<-diag8_wide %>% select(starts_with("visit"))
+(visits<-names(visits[,-c(1,2)]))
+
+diag9_wide<-tmerge(diag8_wide %>% select(-starts_with("visit")), diag8_wide, id=PAT_MRN_ID, tstop=futime)
+
+for(name in visits){
+  # print(name)
+  diag9_wide <- tmerge(diag9_wide, diag8_wide, id=PAT_MRN_ID, edvisit = event(get(name))
+                     )
+}
+#55632724
+diag9_wide <- tmerge(diag9_wide, diag9_wide, id=PAT_MRN_ID, enum=cumtdc(tstart))
+diag9_wide$id_interval=paste0(diag9_wide$PAT_MRN_ID,"_",sprintf("%.2f", diag9_wide$tstop))
+```
+
+
+## Joining FA to comorbities
+
+```{r}
+# join comorbidities
+comorb1<-diag7 %>% 
+  dplyr::group_by(PAT_MRN_ID)%>%
+  arrange(PAT_MRN_ID,VISIT_DATE2) %>%
+  # head(.,1000) %>%   # QUICK TEST FOR FIRST TEN ROWS
+  mutate(prevAD=if_else(myICD=="L20",1,0),
+         AD=if_else(cumsum(prevAD)>0,T,F),
+         prevAS=if_else(myICD=="J45",1,0),
+         AS=if_else(cumsum(prevAS)>0,T,F),
+         prevAR=if_else(myICD=="J30",1,0),
+         AR=if_else(cumsum(prevAR)>0,T,F),
+         prevFA=if_else(myICD=="Z91",1,0),
+         FA=if_else(cumsum(prevFA)>0,T,F),
+         prevEoE=if_else(myICD=="K20",1,0),
+         EoE=if_else(cumsum(prevEoE)>0,T,F),
+         id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval))
+         ) %>% 
+  dplyr::filter(myICD=="Z91" & interval>=0) %>% 
+  ungroup() %>% 
+  select(id_interval,BIRTH_DATE2,GENDER,PATIENT_RACE,age_visit,interval,AD,AS,AR,FA,EoE)
+
+diag10_wide<-diag9_wide %>% 
+  left_join(comorb1,by="id_interval")
+
+# Join VISIT_DATE2 by id_interval
+diag8_visitdate<-diag8 %>% 
+  select(PAT_MRN_ID,interval,VISIT_DATE2,id_date) %>% 
+  mutate(id_interval=paste0(PAT_MRN_ID,"_",sprintf("%.2f", interval)))
+
+diag11_wide<-diag10_wide %>% 
+  left_join(diag8_visitdate,by="id_interval") %>% 
+  select(-c(PAT_MRN_ID.y,interval.y,myICD.y)) %>% 
+  rename(
+         myICD=myICD.x,
+         PAT_MRN_ID=PAT_MRN_ID.x,
+         interval=interval.x) 
+
+#Join of exposures
+diag12_wide<-diag11_wide %>% 
+  left_join(exposures,by="id_date") 
+
+# NA filling
+diag13_wide <- diag12_wide %>%
+  dplyr::group_by(PAT_MRN_ID) %>%
+  arrange(PAT_MRN_ID, tstart) %>%
+  mutate(
+    BIRTH_DATE2 = if_else(is.na(BIRTH_DATE2), lag(BIRTH_DATE2), BIRTH_DATE2),
+    VISIT_DATE2 = if_else(is.na(VISIT_DATE2), maxdate, VISIT_DATE2),
+    RACE = if_else(is.na(PATIENT_RACE), lag(PATIENT_RACE), PATIENT_RACE),
+    GENDER = if_else(is.na(GENDER), lag(GENDER), GENDER),
+    AD = if_else(is.na(AD), lag(AD), AD),
+    AS = if_else(is.na(AS), lag(AS), AS),
+    AR = if_else(is.na(AR), lag(AR), AR),
+    FA = if_else(is.na(FA), lag(FA), FA),
+    EoE = if_else(is.na(EoE), lag(EoE), EoE),
+    age_visit=if_else(is.na(age_visit),round((unclass(maxdate)-unclass(BIRTH_DATE2)) / 365.25,1),age_visit),
+    lat=if_else(is.na(lat), lag(lat), lat) # used as a flag for deletion
+  ) %>%  
+  mutate(RACE=as.factor(recode(RACE, 
+                         `WHITE`="EA",
+                         `BLACK OR AFRICAN AMERICAN`="AA"))) 
+
+# test with this case 0000637772
+
+fa_wide<-diag13_wide%>% 
+  select(PAT_MRN_ID,VISIT_DATE2,id_date,id_interval,tstart,tstop,edvisit,futime,enum,age_visit,GENDER,RACE,AD,AS,AR,FA,EoE,
+         lat,lon,census_tract_id,county_id,avgDailyPM,dep_index,ndvi) %>% 
+  mutate(year=year(VISIT_DATE2)) %>% 
+  filter(!is.na(lat) )
+
+```
+
+
+```{r}
+rm(diag,diag2,diag3,diag4,diag5,diag6,diag7,diag8,diag8_visitdate,diag8_wide,diag9_wide,diag10_wide,
+   diag11_wide,diag12_wide,diag13_wide,degauss_ndvi,degauss_pm,degauss_pm2,degauss3,degauss4,
+   futime,intervaltime,visits,name,addresses,exposures,
+   patients,patients2,diseases,mindate,maxdate,x,x_days,x_m,comorb1,comorbidities_list,
+   coi.list,data,temp,degauss5,degauss6,degauss7,cox.as,currentFilename,var,pm_files,f1,depidx_files,greenspace_files)
+
+save.image("data/atm_survival_v6.RData")
+
+```
+
+Adding public insurance
+
+```{r}
+hcType<-read.delim("data/1426_Visit_financialclss.txt",header = T,sep = "|")
+hcType$PAT_MRN_ID2<-as.integer(hcType$PAT_MRN_ID)
+
+hcType$PAT_MRN_ID3<-sprintf("%010d", hcType$PAT_MRN_ID2)
+
+load("data/atm_survival_v6.RData")
+```
+
+```{r}
+
+summary(hcType$FINANCIAL_CLASS)
+
+hcType$hcType<-as.factor(plyr::revalue(as.character(hcType$FINANCIAL_CLASS), 
+                                        c("Medicare"="Medicaid",
+                                          "Medicaid"="Medicaid",
+                                          "Specialty Medicaid"="Medicaid",
+                                          "Specialty Medicaid Cap"="Medicaid",
+                                          "HMO Medicaid Cap"="Medicaid",
+                                          "HMO Medicaid"="Medicaid",
+                                          "MACSIS"="Medicaid",
+                                          "BCMH"="Medicaid",
+                                          "HMO"="Commercial",
+                                          "Commercial"="Commercial",
+                                          "Blue Shield"="Commercial",
+                                          "Exchange"="Commercial",
+                                          "CLEARING"="Other",
+                                          "International"="Other",
+                                          "Self-Pay"="Commercial",
+                                          "Specialty"="Commercial",
+                                          "Pending Medicaid"="Medicaid"
+                                          )))
+
+summary(hcType$hcType)
+
+
+hc2<-hcType[!duplicated(hcType$PAT_MRN_ID3),]%>%
+  dplyr::filter(hcType=="Commercial" | hcType=="Medicaid") %>% 
+  select(PAT_MRN_ID3,hcType) %>% 
+  rename(PAT_MRN_ID=PAT_MRN_ID3)
+hc2<-droplevels(hc2)
+summary(hc2$hcType)
+
+
+```
+
+
+```{r}
+eoe_wide<-left_join(eoe_wide,hc2,by="PAT_MRN_ID")
+ad_wide<-left_join(ad_wide,hc2,by="PAT_MRN_ID")
+as_wide<-left_join(as_wide,hc2,by="PAT_MRN_ID")
+ar_wide<-left_join(ar_wide,hc2,by="PAT_MRN_ID")
+fa_wide<-left_join(fa_wide,hc2,by="PAT_MRN_ID")
+summary(eoe_wide)
+summary(ad_wide)
+summary(as_wide)
+summary(ar_wide)
+summary(fa_wide)
+```
+
+```{r}
+rm(hc2,hcType,geocoded_files)
+
+save.image("data/atm_survival_v7.RData")
+
+```
+
