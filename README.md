@@ -17,15 +17,13 @@ Remember, the goal of Survival Analysis is not just to predict when an event wil
 We determined the probability of ED encounter-free survival time using hazard ratios (HRs) and time to recurrence (TTR) of ED encounter using Bayesian survival models. This repo covers all code developed for the project:
 
 - Full probabilistic workflow (bayesian) for survival analysis in rstanarm, including recurrent visits (frailty).
-
 - model specification with splines, priors, and validation.
-
 - Fancy visualization from scratch in ggplot.
-
 - Deployment in Shiny (working progress).
 
 # Other sources
 
-- Full manuscript [here](https://doi.org/10.1016/j.jaip.2024.07.009)
-
+- Analyzing Racial Disparities in Pediatric Atopic Comorbidity Emergency Department Visitation Using Electronic Health Records
+Correa-Agudelo, Esteban et al. The Journal of Allergy and Clinical Immunology: In Practice, Volume 12, Issue 10, 2826 - 2837.e10. [DOI](https://doi.org/10.1016/j.jaip.2024.07.009)
 - My bayesian survival tutorial in R [Link](https://maurosc3ner.github.io/bayesian.survival.github.io/)
+- Brilleman SL, Elci EM, Novik JB, Wolfe R. Bayesian survival analysis using the rstanarm R Package. Preprint published online February 22, 2020. [arXiv](https://doi.org/ 10.48550/arXiv.2002.09633)
