@@ -6,9 +6,12 @@ Briefly, survival analysis is a branch of statistics that deals with analyzing t
 We determined the probability of ED encounterfree survival time using hazard ratios (HRs) and time to recurrence (TTR) of ED encounter using Bayesian survival models. This repo covers all code developed for the project:
 
 -Full probabilistic workflow (bayesian) for survival analysis in rstanarm, including recurrent visits (frailty).
+
 -model specification with splines, priors, and validation.
-fancy visualization from scratch in ggplot.
--even deployment in Shiny (working progress).
+
+-Fancy visualization from scratch in ggplot.
+
+-Deployment in Shiny (working progress).
 
 # Other sources
 
